@@ -39,7 +39,11 @@ function escapeHtml(value) {
 }
 
 function formatJobTitle(job) {
-  return job.playlistName || "Playlist job";
+  if (job.playlistName) return job.playlistName;
+  if (job.status === "queued" || job.status === "running") {
+    return "Analyzing playlist";
+  }
+  return "Playlist job";
 }
 
 function formatFolder(job) {
@@ -51,6 +55,69 @@ function formatFolder(job) {
 function formatPhase(phase) {
   if (phase === "Queued") return "Ready to download";
   return phase || "-";
+}
+
+function getProgressModel(job, rawLog) {
+  const steps = [
+    { key: "queued", label: "Received your playlist link" },
+    { key: "metadata", label: "Reading playlist details" },
+    { key: "matching", label: "Matching songs to audio sources" },
+    { key: "downloading", label: "Downloading and organizing files" },
+    { key: "retrying", label: "Retrying anything missing" },
+    { key: "done", label: "Finished" },
+  ];
+
+  let activeKey = "queued";
+  let note = "Your playlist is in line and ready to start.";
+
+  if (job.status === "failed") {
+    activeKey = "retrying";
+    note = "The downloader hit a problem. Check the latest activity or full log below.";
+  } else if (job.status === "canceled") {
+    activeKey = "retrying";
+    note = "This playlist was canceled from the app.";
+  } else if (job.phase === "Saving playlist metadata") {
+    activeKey = "metadata";
+    note = "We are checking the playlist link and collecting song details from Spotify.";
+  } else if (job.phase === "Downloading playlist") {
+    activeKey = "downloading";
+    if (job.downloadedCount > 0) {
+      note = `Downloading is in progress. ${job.downloadedCount} file${job.downloadedCount === 1 ? "" : "s"} saved so far.`;
+    } else if (job.trackCount) {
+      note = `Playlist found with ${job.trackCount} songs. Now matching tracks to working audio sources.`;
+      activeKey = "matching";
+    } else {
+      note = "Preparing the playlist for download.";
+      activeKey = "matching";
+    }
+  } else if (job.phase === "Retrying missing songs") {
+    activeKey = "retrying";
+    note = job.missingCount > 0
+      ? `We are retrying the remaining ${job.missingCount} file${job.missingCount === 1 ? "" : "s"} with fallback sources.`
+      : "Checking whether any files still need another pass.";
+  } else if (job.phase === "Finished" || job.status === "completed") {
+    activeKey = "done";
+    note = job.missingCount > 0
+      ? `Finished with ${job.downloadedCount || 0} downloaded and ${job.missingCount} still left.`
+      : `Finished successfully. ${job.downloadedCount || 0} file${job.downloadedCount === 1 ? "" : "s"} downloaded.`;
+  }
+
+  const downloadedMention = /Downloaded "/.test(rawLog || "");
+  if (activeKey === "matching" && downloadedMention) {
+    activeKey = "downloading";
+  }
+
+  const activeIndex = steps.findIndex(step => step.key === activeKey);
+  return {
+    note,
+    steps: steps.map((step, index) => ({
+      ...step,
+      state:
+        index < activeIndex ? "done" :
+        index === activeIndex ? "active" :
+        "todo",
+    })),
+  };
 }
 
 function formatMeta(job) {
@@ -214,6 +281,8 @@ function ensureJobCard(job) {
     urlEl: fragment.querySelector(".job-url"),
     badgeEl: fragment.querySelector(".badge"),
     metaEl: fragment.querySelector(".meta"),
+    progressNoteEl: fragment.querySelector(".progress-note"),
+    progressStepsEl: fragment.querySelector(".progress-steps"),
     missingEl: fragment.querySelector(".missing-list"),
     previewEl: fragment.querySelector(".log-preview"),
     openFolderButtonEl: fragment.querySelector(".open-folder-button"),
@@ -237,6 +306,8 @@ async function upsertJob(job) {
     urlEl,
     badgeEl,
     metaEl,
+    progressNoteEl,
+    progressStepsEl,
     missingEl,
     previewEl,
     openFolderButtonEl,
@@ -254,6 +325,12 @@ async function upsertJob(job) {
   urlEl.textContent = job.url;
   badgeEl.textContent = job.status;
   metaEl.innerHTML = formatMeta(job);
+  const progress = getProgressModel(job, rawLog);
+  progressNoteEl.textContent = progress.note;
+  progressStepsEl.innerHTML = progress.steps.map(step => {
+    const dot = step.state === "done" ? "Done" : step.state === "active" ? "Now" : "Next";
+    return `<div class="progress-step" data-state="${step.state}"><span class="progress-pill">${dot}</span><span>${escapeHtml(step.label)}</span></div>`;
+  }).join("");
   renderMissingSongs(job, missingEl);
   previewEl.textContent = getLatestLogPreview(rawLog);
   previewEl.dataset.error = job.error ? "true" : "false";
