@@ -1,9 +1,0 @@
-﻿[2026-05-22 09:33:33] Running: spotdl.exe save https://open.spotify.com/playlist/5nH2JXeF7a7PNXupkS6UQI?si=VEDK7xooRx-tVkFnjzSMBw --save-file C:\Users\Marketing\Documents\Codex\2026-05-22\check-this-github-https-github-com\app-data\jobs\aeaf48fa65b74a37b9eb67ba04bde510.spotdl
-[2026-05-22 09:33:45] Processing query:                                                              
-[2026-05-22 09:33:45] https://open.spotify.com/playlist/5nH2JXeF7a7PNXupkS6UQI?si=VEDK7xooRx-tVkFnjzS
-[2026-05-22 09:33:45] MBw                                                                            
-[2026-05-22 09:33:55] Found 3 songs in jason test dwnload (Playlist)                                 
-[2026-05-22 09:34:20] Saved 3 songs to                                                               
-[2026-05-22 09:34:20] C:\Users\Marketing\Documents\Codex\2026-05-22\check-this-github-https-github-co
-[2026-05-22 09:34:20] m\app-data\jobs\aeaf48fa65b74a37b9eb67ba04bde510.spotdl                        
-[2026-05-22 09:34:20] Worker failed: Cannot bind argument to parameter 'Message' because it is an empty string.
