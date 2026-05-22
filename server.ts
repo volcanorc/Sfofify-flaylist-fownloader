@@ -13,6 +13,7 @@ for (const path of [webRoot, dataRoot, historyRoot, downloadsRoot]) {
 type JobRecord = {
   id: string;
   url: string;
+  urlType: "playlist" | "track" | "artist" | "unknown";
   status: string;
   phase: string;
   createdAt: string;
@@ -28,6 +29,10 @@ type JobRecord = {
   logPath: string;
   metadataPath: string;
   workerPid: number | null;
+  matchCount: number;
+  currentSong: string | null;
+  currentProviderPhase: string | null;
+  retryOf: string | null;
   error: string | null;
 };
 
@@ -51,11 +56,48 @@ async function writeJob(job: JobRecord) {
   await Deno.writeTextFile(getJobFilePath(job.id), JSON.stringify(job, null, 2));
 }
 
+function normalizeJob(job: Partial<JobRecord>): JobRecord {
+  return {
+    id: job.id ?? "",
+    url: job.url ?? "",
+    urlType: job.urlType ?? detectSpotifyUrlType(job.url ?? ""),
+    status: job.status ?? "queued",
+    phase: job.phase ?? "Queued",
+    createdAt: job.createdAt ?? new Date(0).toISOString(),
+    updatedAt: job.updatedAt ?? new Date(0).toISOString(),
+    playlistName: job.playlistName ?? null,
+    playlistId: job.playlistId ?? null,
+    outputFolder: job.outputFolder ?? null,
+    trackCount: job.trackCount ?? null,
+    uniqueTrackCount: job.uniqueTrackCount ?? null,
+    downloadedCount: job.downloadedCount ?? 0,
+    missingCount: job.missingCount ?? null,
+    missingSongs: job.missingSongs ?? [],
+    logPath: job.logPath ?? "",
+    metadataPath: job.metadataPath ?? "",
+    workerPid: job.workerPid ?? null,
+    matchCount: job.matchCount ?? 0,
+    currentSong: job.currentSong ?? null,
+    currentProviderPhase: job.currentProviderPhase ?? null,
+    retryOf: job.retryOf ?? null,
+    error: job.error ?? null,
+  };
+}
+
+function detectSpotifyUrlType(url: string): JobRecord["urlType"] {
+  const match = url.match(/open\.spotify\.com\/(playlist|track|artist)\//i);
+  const kind = match?.[1]?.toLowerCase();
+  if (kind === "playlist" || kind === "track" || kind === "artist") {
+    return kind;
+  }
+  return "unknown";
+}
+
 async function readJob(jobId: string): Promise<JobRecord | null> {
   try {
     const text = await Deno.readTextFile(getJobFilePath(jobId));
     const cleaned = text.replace(/^\uFEFF/, "");
-    return JSON.parse(cleaned) as JobRecord;
+    return normalizeJob(JSON.parse(cleaned) as Partial<JobRecord>);
   } catch {
     return null;
   }
@@ -110,20 +152,69 @@ async function migrateLegacyJobs() {
   }
 }
 
-async function deleteIfExists(path: string) {
+async function deleteIfExists(path: string, recursive = false) {
   try {
-    await Deno.remove(path);
-  } catch {
+    await Deno.remove(path, { recursive });
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) {
+      return;
+    }
+    throw error;
   }
 }
 
-async function createJob(url: string): Promise<JobRecord> {
+async function exists(path: string) {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function removeJobArtifacts(jobId: string) {
+  const targets = [
+    { path: getJobDir(jobId), recursive: true },
+    { path: `${dataRoot}\\jobs\\${jobId}.json`, recursive: false },
+    { path: `${dataRoot}\\jobs\\${jobId}.spotdl`, recursive: false },
+    { path: `${dataRoot}\\jobs\\${jobId}.log`, recursive: false },
+    { path: `${dataRoot}\\logs\\${jobId}.log`, recursive: false },
+  ];
+
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    lastError = null;
+    try {
+      for (const target of targets) {
+        await deleteIfExists(target.path, target.recursive);
+      }
+      if (!(await exists(getJobDir(jobId)))) {
+        return;
+      }
+      lastError = new Error("Saved history folder still exists after delete.");
+    } catch (error) {
+      lastError = error;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Saved history could not be removed from disk.");
+}
+
+async function createJob(url: string, retryOf: string | null = null): Promise<JobRecord> {
   const id = crypto.randomUUID().replaceAll("-", "");
   const jobFolder = getJobDir(id);
   await Deno.mkdir(jobFolder, { recursive: true });
   const job: JobRecord = {
     id,
     url,
+    urlType: detectSpotifyUrlType(url),
     status: "queued",
     phase: "Queued",
     createdAt: new Date().toISOString(),
@@ -139,6 +230,10 @@ async function createJob(url: string): Promise<JobRecord> {
     logPath: `${jobFolder}\\log.txt`,
     metadataPath: `${jobFolder}\\playlist.spotdl`,
     workerPid: null,
+    matchCount: 0,
+    currentSong: null,
+    currentProviderPhase: null,
+    retryOf,
     error: null,
   };
   await writeJob(job);
@@ -221,12 +316,12 @@ for (let offset = 0; offset < 15; offset++) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/downloads") {
-    const body = await request.json().catch(() => null) as { url?: string } | null;
+    const body = await request.json().catch(() => null) as { url?: string; retryOf?: string } | null;
     if (!body?.url?.trim()) {
       return json({ error: "Missing playlist URL." }, 400);
     }
 
-    const job = await createJob(body.url.trim());
+    const job = await createJob(body.url.trim(), body.retryOf?.trim() || null);
     await spawnWorker(job.id);
     return json(job, 202);
   }
@@ -257,7 +352,11 @@ for (let offset = 0; offset < 15; offset++) {
       return json({ error: "You can remove history only after the job finishes." }, 409);
     }
 
-    await deleteIfExists(`${historyRoot}\\${job.id}`);
+    try {
+      await removeJobArtifacts(job.id);
+    } catch (error) {
+      return json({ error: `Could not remove saved history. ${error instanceof Error ? error.message : "Unknown delete error."}` }, 500);
+    }
 
     return json({ ok: true, id: job.id });
   }
