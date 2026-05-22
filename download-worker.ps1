@@ -401,6 +401,7 @@ try {
         missingSongs = $finalMissingSongs
         missingCount = $finalMissingSongs.Count
         downloadedCount = $finalDownloadedCount
+        workerPid = $null
         error = $null
     } | Out-Null
 
@@ -412,6 +413,7 @@ catch {
     Update-Job -Id $JobId -Changes @{
         status = "failed"
         phase = "Failed"
+        workerPid = $null
         error = $message
     } | Out-Null
 }

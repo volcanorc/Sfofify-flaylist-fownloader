@@ -194,12 +194,22 @@ button:disabled {
 }
 
 button.ghost,
+.open-folder-button,
+.cancel-button,
 .log-button,
 .remove-button {
   border: 1px solid rgba(147, 167, 202, 0.14);
   background: rgba(255, 255, 255, 0.04);
   color: var(--ink);
   box-shadow: none;
+}
+
+.open-folder-button {
+  color: var(--accent-strong);
+}
+
+.cancel-button {
+  color: var(--warn);
 }
 
 .remove-button {
@@ -387,6 +397,8 @@ code {
   }
 
   button,
+  .open-folder-button,
+  .cancel-button,
   .log-button,
   .remove-button,
   input {

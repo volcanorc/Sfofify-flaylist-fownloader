@@ -12,6 +12,7 @@ const closeLogModal = document.querySelector("#close-log-modal");
 
 const activeLogs = new Map();
 const jobElements = new Map();
+const jobStateCache = new Map();
 const deletingJobs = new Set();
 let lastJobsSignature = "";
 
@@ -47,17 +48,22 @@ function formatFolder(job) {
   return parts[parts.length - 1];
 }
 
+function formatPhase(phase) {
+  if (phase === "Queued") return "Ready to download";
+  return phase || "-";
+}
+
 function formatMeta(job) {
   const lines = [];
-  lines.push(`Stage: ${job.phase || "-"}`);
+  lines.push(`Stage: ${formatPhase(job.phase)}`);
   if (job.trackCount) lines.push(`Tracks found: ${job.trackCount}`);
   if (job.uniqueTrackCount) lines.push(`Unique tracks: ${job.uniqueTrackCount}`);
   lines.push(`Downloaded files: ${job.downloadedCount || 0}`);
   if (job.missingCount !== null && job.missingCount !== undefined) {
-    lines.push(`Still missing: ${job.missingCount}`);
+    lines.push(`Files left: ${job.missingCount}`);
   }
   const folder = formatFolder(job);
-  if (folder) lines.push(`Folder: downloads\\${folder}`);
+  if (folder) lines.push(`Saved in: downloads\\${folder}`);
   if (job.error) lines.push(`Problem: ${job.error}`);
   return lines.map(line => `<span>${escapeHtml(line)}</span>`).join("");
 }
@@ -76,7 +82,7 @@ function formatTimestamp(line) {
   const [, year, month, day, hourText, minute, second, rest] = match;
   let hour = Number(hourText);
   const suffix = hour >= 12 ? "PM" : "AM";
-  hour = hour % 12;
+  hour %= 12;
   if (hour === 0) hour = 12;
   return `[${month}/${day}/${year} ${hour}:${minute}:${second} ${suffix}] ${rest}`;
 }
@@ -89,7 +95,7 @@ function humanizeLine(line) {
 
   if (bare.startsWith("Running: spotdl.exe save")) return formatted.replace(bare, "Reading playlist details from Spotify.");
   if (bare.startsWith("Running: spotdl.exe download")) return formatted.replace(bare, "Starting the download pass.");
-  if (bare.startsWith("Processing query:")) return formatted.replace(bare, "Looking up the link.");
+  if (bare.startsWith("Processing query:")) return formatted.replace(bare, "Looking up the playlist link.");
   if (/^Found \d+ songs in /.test(bare)) {
     const count = bare.match(/^Found (\d+) songs/)?.[1] || "";
     return formatted.replace(bare, `Playlist found. ${count} songs detected.`);
@@ -98,12 +104,21 @@ function humanizeLine(line) {
     const name = bare.match(/^Downloaded "(.+?)"/)?.[1];
     return formatted.replace(bare, name ? `Downloaded: ${name}` : "A track finished downloading.");
   }
-  if (bare.startsWith("Retrying missing song:")) return formatted.replace(bare, bare.replace("Retrying missing song:", "Retrying missing song:"));
-  if (bare.startsWith("Worker failed: --- Logging error ---")) return formatted.replace(bare, "The audio provider emitted a logging error. The app will keep trying safer fallbacks.");
+  if (bare.startsWith("Retrying missing song:")) return formatted.replace(bare, bare);
+  if (bare.startsWith("Save step failed. Retrying metadata fetch")) return formatted.replace(bare, "Retrying the Spotify metadata lookup.");
+  if (bare.includes("You might be blocked by YouTube Music")) return formatted.replace(bare, "The audio provider may be rate-limiting requests. Fallbacks can still recover songs.");
+  if (bare.startsWith("Canceled by user.")) return formatted.replace(bare, "Canceled from the app.");
+  if (bare.startsWith("Worker failed: --- Logging error ---")) return formatted.replace(bare, "The provider emitted a logging error. The downloader will try safer fallbacks where possible.");
   if (bare.startsWith("Worker failed:")) return formatted.replace(bare, bare.replace("Worker failed:", "The downloader stopped:"));
-  if (bare.startsWith("Finished. Downloaded files:")) return formatted.replace(bare, bare.replace("Finished. Downloaded files:", "Finished. Files downloaded:").replace("Missing songs:", "Songs still missing:"));
-  if (bare.includes("You might be blocked by YouTube Music")) return formatted.replace(bare, "The provider may be rate-limiting requests. Fallbacks may still recover the missing songs.");
   if (bare.startsWith("--- Logging error ---")) return formatted.replace(bare, "The provider emitted a logging error. Fallbacks may still continue.");
+  if (bare.startsWith("Finished. Downloaded files:")) {
+    return formatted.replace(
+      bare,
+      bare
+        .replace("Finished. Downloaded files:", "Finished. Files downloaded:")
+        .replace("Missing songs:", "Files left:")
+    );
+  }
 
   return formatted;
 }
@@ -120,7 +135,11 @@ function getLatestHumanLine(logText) {
   return humanizeLine(latest);
 }
 
-async function loadLog(jobId) {
+async function loadLog(jobId, force = false) {
+  if (!force && activeLogs.has(jobId)) {
+    return activeLogs.get(jobId);
+  }
+
   const data = await fetchJson(`/api/jobs/${jobId}/log`);
   const nextLog = data.log || "";
   activeLogs.set(jobId, nextLog);
@@ -157,13 +176,30 @@ async function removeJob(job) {
     card.remove();
     jobElements.delete(job.id);
   }
+
   await fetchJson(`/api/jobs/${job.id}`, { method: "DELETE" });
   activeLogs.delete(job.id);
+  jobStateCache.delete(job.id);
   deletingJobs.delete(job.id);
+  lastJobsSignature = "";
   setMessage(`Removed saved history for "${formatJobTitle(job)}".`, "success");
+
   if (!jobsEl.children.length) {
     jobsEl.innerHTML = '<p class="empty">No saved jobs yet.</p>';
   }
+}
+
+async function cancelJob(job) {
+  await fetchJson(`/api/jobs/${job.id}/cancel`, { method: "POST" });
+  activeLogs.delete(job.id);
+  jobStateCache.delete(job.id);
+  lastJobsSignature = "";
+  setMessage(`Canceled "${formatJobTitle(job)}".`, "success");
+  await renderJobs();
+}
+
+async function openFolder(job) {
+  await fetchJson(`/api/jobs/${job.id}/open-folder`, { method: "POST" });
 }
 
 function ensureJobCard(job) {
@@ -180,8 +216,10 @@ function ensureJobCard(job) {
     metaEl: fragment.querySelector(".meta"),
     missingEl: fragment.querySelector(".missing-list"),
     previewEl: fragment.querySelector(".log-preview"),
+    openFolderButtonEl: fragment.querySelector(".open-folder-button"),
+    cancelButtonEl: fragment.querySelector(".cancel-button"),
     logButtonEl: fragment.querySelector(".log-button"),
-    removeButtonEl: fragment.querySelector(".remove-button")
+    removeButtonEl: fragment.querySelector(".remove-button"),
   };
 
   card._refs = refs;
@@ -194,8 +232,22 @@ async function upsertJob(job) {
 
   jobsEl.querySelector(".empty")?.remove();
   const card = ensureJobCard(job);
-  const { titleEl, urlEl, badgeEl, metaEl, missingEl, previewEl, logButtonEl, removeButtonEl } = card._refs;
-    const rawLog = await loadLog(job.id).catch(error => `Unable to load log: ${error.message}`);
+  const {
+    titleEl,
+    urlEl,
+    badgeEl,
+    metaEl,
+    missingEl,
+    previewEl,
+    openFolderButtonEl,
+    cancelButtonEl,
+    logButtonEl,
+    removeButtonEl,
+  } = card._refs;
+
+  const previousState = jobStateCache.get(job.id);
+  const shouldReloadLog = !previousState || previousState.updatedAt !== job.updatedAt || previousState.status !== job.status;
+  const rawLog = await loadLog(job.id, shouldReloadLog).catch(error => `Unable to load log: ${error.message}`);
 
   card.dataset.status = job.status;
   titleEl.textContent = formatJobTitle(job);
@@ -203,14 +255,28 @@ async function upsertJob(job) {
   badgeEl.textContent = job.status;
   metaEl.innerHTML = formatMeta(job);
   renderMissingSongs(job, missingEl);
-    previewEl.textContent = getLatestLogPreview(rawLog);
-    previewEl.dataset.error = job.error ? "true" : "false";
-    removeButtonEl.disabled = job.status === "running" || job.status === "queued";
+  previewEl.textContent = getLatestLogPreview(rawLog);
+  previewEl.dataset.error = job.error ? "true" : "false";
 
-    logButtonEl.onclick = () => openLogModal(job, rawLog);
+  openFolderButtonEl.disabled = !job.outputFolder;
+  cancelButtonEl.disabled = !(job.status === "running" || job.status === "queued");
+  removeButtonEl.disabled = job.status === "running" || job.status === "queued";
+
+  openFolderButtonEl.onclick = () => {
+    openFolder(job).catch(error => setMessage(error.message, "error"));
+  };
+  cancelButtonEl.onclick = () => {
+    cancelJob(job).catch(error => setMessage(error.message, "error"));
+  };
+  logButtonEl.onclick = () => openLogModal(job, rawLog);
   removeButtonEl.onclick = () => {
     removeJob(job).catch(error => setMessage(error.message, "error"));
   };
+
+  jobStateCache.set(job.id, {
+    updatedAt: job.updatedAt,
+    status: job.status,
+  });
 
   if (!card.isConnected) {
     jobsEl.appendChild(card);
@@ -220,6 +286,7 @@ async function upsertJob(job) {
 async function renderJobs() {
   const data = await fetchJson("/api/jobs");
   const jobs = (data.jobs || []).filter(job => !deletingJobs.has(job.id));
+
   const signature = JSON.stringify(
     jobs.map(job => ({
       id: job.id,
@@ -228,7 +295,7 @@ async function renderJobs() {
       downloadedCount: job.downloadedCount,
       missingCount: job.missingCount,
       updatedAt: job.updatedAt,
-      error: job.error
+      error: job.error,
     }))
   );
 
@@ -244,20 +311,12 @@ async function renderJobs() {
       card.remove();
       jobElements.delete(jobId);
       activeLogs.delete(jobId);
+      jobStateCache.delete(jobId);
     }
   }
 
   for (const job of jobs) {
     await upsertJob(job);
-  }
-
-  const orderedCards = jobs
-    .map(job => jobElements.get(job.id))
-    .filter(Boolean);
-  for (const card of orderedCards) {
-    if (card && card.parentElement !== jobsEl) {
-      jobsEl.appendChild(card);
-    }
   }
 
   if (jobs.length === 0 && !jobsEl.querySelector(".empty")) {
@@ -278,12 +337,13 @@ form.addEventListener("submit", async event => {
     const job = await fetchJson("/api/downloads", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url })
+      body: JSON.stringify({ url }),
     });
     activeLogs.delete(job.id);
+    jobStateCache.delete(job.id);
     lastJobsSignature = "";
     input.value = "";
-    setMessage("Job started. We’ll keep updating the status below.", "success");
+    setMessage("Job started. We'll keep updating the status below.", "success");
     await renderJobs();
   } catch (error) {
     setMessage(error.message, "error");
@@ -317,4 +377,4 @@ logModal.addEventListener("click", event => {
 renderJobs().catch(error => setMessage(error.message, "error"));
 setInterval(() => {
   renderJobs().catch(() => {});
-}, 4000);
+}, 1000);
