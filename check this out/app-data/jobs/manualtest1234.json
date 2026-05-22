@@ -1,0 +1,19 @@
+{
+    "id":  "manualtest1234",
+    "url":  "https://open.spotify.com/playlist/5nH2JXeF7a7PNXupkS6UQI?si=VEDK7xooRx-tVkFnjzSMBw",
+    "status":  "completed",
+    "phase":  "Finished",
+    "createdAt":  "2026-05-22T01:38:41.2014947Z",
+    "updatedAt":  "2026-05-22T01:41:01.5204049Z",
+    "playlistName":  "jason test dwnload",
+    "playlistId":  "5nH2JXeF7a7PNXupkS6UQI",
+    "outputFolder":  "C:\\Users\\Marketing\\Documents\\Codex\\2026-05-22\\check-this-github-https-github-com\\downloads\\jason test dwnload (5nH2JXeF7a7PNXupkS6UQI)",
+    "trackCount":  3,
+    "uniqueTrackCount":  3,
+    "downloadedCount":  3,
+    "missingCount":  0,
+    "missingSongs":  null,
+    "logPath":  "C:\\Users\\Marketing\\Documents\\Codex\\2026-05-22\\check-this-github-https-github-com\\app-data\\jobs\\manualtest1234.log",
+    "metadataPath":  "C:\\Users\\Marketing\\Documents\\Codex\\2026-05-22\\check-this-github-https-github-com\\app-data\\jobs\\manualtest1234.spotdl",
+    "error":  null
+}

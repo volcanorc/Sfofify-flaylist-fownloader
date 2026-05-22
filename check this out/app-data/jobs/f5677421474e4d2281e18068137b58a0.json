@@ -1,0 +1,21 @@
+﻿{
+    "id":  "f5677421474e4d2281e18068137b58a0",
+    "url":  "https://open.spotify.com/playlist/5nH2JXeF7a7PNXupkS6UQI?si=7037c833d0e549ad",
+    "status":  "failed",
+    "phase":  "Failed",
+    "createdAt":  "2026-05-22T01:26:22.621Z",
+    "updatedAt":  "2026-05-22T01:27:11.8055863Z",
+    "playlistName":  null,
+    "playlistId":  null,
+    "outputFolder":  null,
+    "trackCount":  null,
+    "uniqueTrackCount":  null,
+    "downloadedCount":  0,
+    "missingCount":  null,
+    "missingSongs":  [
+
+                     ],
+    "logPath":  "C:\\Users\\Marketing\\Documents\\Codex\\2026-05-22\\check-this-github-https-github-com\\app-data\\jobs\\f5677421474e4d2281e18068137b58a0.log",
+    "metadataPath":  "C:\\Users\\Marketing\\Documents\\Codex\\2026-05-22\\check-this-github-https-github-com\\app-data\\jobs\\f5677421474e4d2281e18068137b58a0.spotdl",
+    "error":  "Cannot bind argument to parameter \u0027Message\u0027 because it is an empty string."
+}

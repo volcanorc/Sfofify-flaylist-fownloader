@@ -1,0 +1,73 @@
+﻿[2026-05-22 09:41:45] Running: spotdl.exe save https://open.spotify.com/playlist/37i9dQZF1E4qPDnXItqGzF?si=ab35040ea8384a7a --save-file C:\Users\Marketing\Documents\Codex\2026-05-22\check-this-github-https-github-com\app-data\jobs\bca8765b477d4c689ed9f8897dfa3ebf.spotdl
+[2026-05-22 09:41:56] Processing query:
+[2026-05-22 09:41:56] https://open.spotify.com/playlist/37i9dQZF1E4qPDnXItqGzF?si=ab35040ea8384a7a
+[2026-05-22 09:42:06] Found 50 songs in Lil Nas X Radio (Playlist)
+[2026-05-22 09:46:51] Saved 50 songs to
+[2026-05-22 09:46:51] C:\Users\Marketing\Documents\Codex\2026-05-22\check-this-github-https-github-co
+[2026-05-22 09:46:51] m\app-data\jobs\bca8765b477d4c689ed9f8897dfa3ebf.spotdl
+[2026-05-22 09:46:51] 
+[2026-05-22 09:46:52] Running: spotdl.exe download https://open.spotify.com/playlist/37i9dQZF1E4qPDnXItqGzF?si=ab35040ea8384a7a --threads 4 --save-file C:\Users\Marketing\Documents\Codex\2026-05-22\check-this-github-https-github-com\app-data\jobs\bca8765b477d4c689ed9f8897dfa3ebf.spotdl --overwrite skip --output {artists} - {title}.{output-ext} --print-errors
+[2026-05-22 09:47:06] Processing query:
+[2026-05-22 09:47:06] https://open.spotify.com/playlist/37i9dQZF1E4qPDnXItqGzF?si=ab35040ea8384a7a
+[2026-05-22 09:47:16] Found 50 songs in Lil Nas X Radio (Playlist)
+[2026-05-22 09:47:50] Downloaded "Trevor Daniel - Falling":
+[2026-05-22 09:47:50] https://music.youtube.com/watch?v=P9L_ZWVPX4g
+[2026-05-22 09:47:51] Downloaded "Glass Animals - Heat Waves":
+[2026-05-22 09:47:51] https://music.youtube.com/watch?v=XDjB9E3YtUE
+[2026-05-22 09:47:54] Downloaded "Arizona Zervas - ROXANNE":
+[2026-05-22 09:47:54] https://music.youtube.com/watch?v=2EYHZ2zUqTg
+[2026-05-22 09:47:55] Downloaded "Lil Nas X - INDUSTRY BABY (feat. Jack Harlow)":
+[2026-05-22 09:47:55] https://music.youtube.com/watch?v=jPe0bX_GtBo
+[2026-05-22 09:48:21] Downloaded "Lil Nas X - Panini": https://music.youtube.com/watch?v=bG_NI-cCxDs
+[2026-05-22 09:48:40] Downloaded "Dua Lipa - Don't Start Now":
+[2026-05-22 09:48:40] https://www.youtube.com/watch?v=oygrmJFKYZY
+[2026-05-22 09:48:56] Downloaded "The Weeknd - Blinding Lights":
+[2026-05-22 09:48:56] https://www.youtube.com/watch?v=Scxc6yVDP6Q
+[2026-05-22 09:49:12] Downloaded "Imagine Dragons - Bones":
+[2026-05-22 09:49:12] https://www.youtube.com/watch?v=TO-_3tck2tg
+[2026-05-22 09:49:28] Downloaded "Lil Nas X - MONTERO (Call Me By Your Name)":
+[2026-05-22 09:49:28] https://music.youtube.com/watch?v=oz0Oz5tBOg8
+[2026-05-22 09:49:33] Downloaded "Shawn Mendes - Se±orita":
+[2026-05-22 09:49:33] https://www.youtube.com/watch?v=dU7a-sseu20
+[2026-05-22 09:49:44] Downloaded "Marshmello - Happier":
+[2026-05-22 09:49:44] https://music.youtube.com/watch?v=kfCTO9PPtVo
+[2026-05-22 09:50:00] Downloaded "Jack Harlow - First Class":
+[2026-05-22 09:50:00] https://music.youtube.com/watch?v=pn8psTdqrY0
+[2026-05-22 09:50:05] Downloaded "blackbear - hot girl bummer":
+[2026-05-22 09:50:05] https://music.youtube.com/watch?v=jcnV2cGzmC4
+[2026-05-22 09:50:37] Downloaded "Lil Nas X - HOLIDAY": https://music.youtube.com/watch?v=xxoeSS0wI64
+[2026-05-22 09:50:49] Downloaded "Imagine Dragons - Enemy (with JID) - from the series Arcane League
+[2026-05-22 09:50:49] of Legends": https://www.youtube.com/watch?v=8UIHndYacuk
+[2026-05-22 09:51:04] Downloaded "Sam Smith - Unholy (feat. Kim Petras)":
+[2026-05-22 09:51:04] https://www.youtube.com/watch?v=_fbq8RaKlxI
+[2026-05-22 09:51:11] Downloaded "Roddy Ricch - The Box":
+[2026-05-22 09:51:11] https://music.youtube.com/watch?v=IxJjY5T9yag
+[2026-05-22 09:51:12] Downloaded "Sub Urban - Cradles": https://www.youtube.com/watch?v=KBtk5FUeJbk
+[2026-05-22 09:51:31] Downloaded "Doja Cat - Kiss Me More (feat. SZA)":
+[2026-05-22 09:51:31] https://www.youtube.com/watch?v=Ab6E2BsuLJ0
+[2026-05-22 09:51:51] Downloaded "Jack Harlow - WHATS POPPIN":
+[2026-05-22 09:51:51] https://music.youtube.com/watch?v=CQ34QxGWj4I
+[2026-05-22 09:51:55] Downloaded "Nicky Youre - Sunroof": https://www.youtube.com/watch?v=G5xSLbYMr-I
+[2026-05-22 09:52:04] Downloaded "Charlie Puth - Light Switch":
+[2026-05-22 09:52:04] https://music.youtube.com/watch?v=pGdxftEY2Fg
+[2026-05-22 09:52:24] Downloaded "Lil Nas X - Old Town Road (feat. Billy Ray Cyrus) - Remix":
+[2026-05-22 09:52:24] https://www.youtube.com/watch?v=7ysFgElQtjI
+[2026-05-22 09:52:35] Downloaded "GAYLE - abcdefu": https://www.youtube.com/watch?v=NaFd8ucHLuo
+[2026-05-22 09:52:42] Downloaded "Lil Nas X - THATS WHAT I WANT":
+[2026-05-22 09:52:42] https://music.youtube.com/watch?v=qP1KUarf4VM
+[2026-05-22 09:53:11] Downloaded "DaBaby - ROCKSTAR (feat. Roddy Ricch)":
+[2026-05-22 09:53:11] https://www.youtube.com/watch?v=83xBPCw5hh4
+[2026-05-22 09:53:18] Downloaded "Jason Derulo - Take You Dancing":
+[2026-05-22 09:53:18] https://music.youtube.com/watch?v=rbNKktf8bUY
+[2026-05-22 09:53:24] Downloaded "Lil Tecca - Ransom": https://www.youtube.com/watch?v=DZI1bffCyIc
+[2026-05-22 09:53:28] Downloaded "Camila Cabello - Havana (feat. Young Thug)":
+[2026-05-22 09:53:28] https://www.youtube.com/watch?v=PIcHKcGxCzU
+[2026-05-22 09:53:42] Downloaded "Oliver Tree - Life Goes On":
+[2026-05-22 09:53:42] https://music.youtube.com/watch?v=mzhbRUniU4U
+[2026-05-22 09:53:50] Downloaded "Lil Nas X - Old Town Road":
+[2026-05-22 09:53:50] https://music.youtube.com/watch?v=9YpvNgCSaCU
+[2026-05-22 09:54:16] Downloaded "BoyWithUke - Toxic": https://www.youtube.com/watch?v=Mvaosumc4hU
+[2026-05-22 09:54:51] Downloaded "Lil Nas X - STAR WALKIN' (League of Legends Worlds Anthem)":
+[2026-05-22 09:54:51] https://music.youtube.com/watch?v=_GX3D32b3TI
+[2026-05-22 09:55:27] Downloaded "Doja Cat - Paint The Town Red":
+[2026-05-22 09:55:27] https://music.youtube.com/watch?v=TfOsGnWy8qA
