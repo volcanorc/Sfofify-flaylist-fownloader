@@ -2,11 +2,11 @@ const port = Number(Deno.args[0] ?? "8976");
 const root = Deno.cwd();
 const webRoot = `${root}\\web`;
 const dataRoot = `${root}\\app-data`;
-const jobsRoot = `${dataRoot}\\jobs`;
+const historyRoot = `${dataRoot}\\history`;
 const downloadsRoot = `${root}\\downloads`;
 const workerScript = `${root}\\download-worker.ps1`;
 
-for (const path of [webRoot, dataRoot, jobsRoot, downloadsRoot]) {
+for (const path of [webRoot, dataRoot, historyRoot, downloadsRoot]) {
   await Deno.mkdir(path, { recursive: true });
 }
 
@@ -39,7 +39,7 @@ function json(data: unknown, status = 200) {
 
 async function readJob(jobId: string): Promise<JobRecord | null> {
   try {
-    const text = await Deno.readTextFile(`${jobsRoot}\\${jobId}.json`);
+    const text = await Deno.readTextFile(`${historyRoot}\\${jobId}\\job.json`);
     const cleaned = text.replace(/^\uFEFF/, "");
     return JSON.parse(cleaned) as JobRecord;
   } catch {
@@ -49,17 +49,64 @@ async function readJob(jobId: string): Promise<JobRecord | null> {
 
 async function readAllJobs(): Promise<JobRecord[]> {
   const jobs: JobRecord[] = [];
-  for await (const entry of Deno.readDir(jobsRoot)) {
-    if (!entry.isFile || !entry.name.endsWith(".json")) continue;
-    const job = await readJob(entry.name.replace(/\.json$/, ""));
+  for await (const entry of Deno.readDir(historyRoot)) {
+    if (!entry.isDirectory) continue;
+    const job = await readJob(entry.name);
     if (job) jobs.push(job);
   }
   jobs.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   return jobs;
 }
 
+async function migrateLegacyJobs() {
+  const legacyJobsRoot = `${dataRoot}\\jobs`;
+  const legacyLogsRoot = `${dataRoot}\\logs`;
+
+  try {
+    for await (const entry of Deno.readDir(legacyJobsRoot)) {
+      if (!entry.isFile || !entry.name.endsWith(".json")) continue;
+      const jobId = entry.name.replace(/\.json$/, "");
+      const targetFolder = `${historyRoot}\\${jobId}`;
+      const targetJobFile = `${targetFolder}\\job.json`;
+
+      try {
+        await Deno.stat(targetJobFile);
+        continue;
+      } catch {
+      }
+
+      await Deno.mkdir(targetFolder, { recursive: true });
+      await Deno.copyFile(`${legacyJobsRoot}\\${entry.name}`, targetJobFile);
+
+      try {
+        await Deno.copyFile(`${legacyJobsRoot}\\${jobId}.spotdl`, `${targetFolder}\\playlist.spotdl`);
+      } catch {
+      }
+
+      try {
+        await Deno.copyFile(`${legacyLogsRoot}\\${jobId}.log`, `${targetFolder}\\log.txt`);
+      } catch {
+        try {
+          await Deno.copyFile(`${legacyJobsRoot}\\${jobId}.log`, `${targetFolder}\\log.txt`);
+        } catch {
+        }
+      }
+    }
+  } catch {
+  }
+}
+
+async function deleteIfExists(path: string) {
+  try {
+    await Deno.remove(path);
+  } catch {
+  }
+}
+
 async function createJob(url: string): Promise<JobRecord> {
   const id = crypto.randomUUID().replaceAll("-", "");
+  const jobFolder = `${historyRoot}\\${id}`;
+  await Deno.mkdir(jobFolder, { recursive: true });
   const job: JobRecord = {
     id,
     url,
@@ -75,11 +122,11 @@ async function createJob(url: string): Promise<JobRecord> {
     downloadedCount: 0,
     missingCount: null,
     missingSongs: [],
-    logPath: `${jobsRoot}\\${id}.log`,
-    metadataPath: `${jobsRoot}\\${id}.spotdl`,
+    logPath: `${jobFolder}\\log.txt`,
+    metadataPath: `${jobFolder}\\playlist.spotdl`,
     error: null,
   };
-  await Deno.writeTextFile(`${jobsRoot}\\${id}.json`, JSON.stringify(job, null, 2));
+  await Deno.writeTextFile(`${jobFolder}\\job.json`, JSON.stringify(job, null, 2));
   return job;
 }
 
@@ -123,6 +170,7 @@ function spawnWorker(jobId: string) {
 }
 
 console.log(`spotDL local web UI running at http://localhost:${port}/`);
+await migrateLegacyJobs();
 
 Deno.serve({ hostname: "127.0.0.1", port }, async (request) => {
   const url = new URL(request.url);
@@ -171,6 +219,18 @@ Deno.serve({ hostname: "127.0.0.1", port }, async (request) => {
     const job = await readJob(jobMatch[1]);
     if (!job) return json({ error: "Job not found." }, 404);
     return json(job);
+  }
+
+  if (request.method === "DELETE" && jobMatch) {
+    const job = await readJob(jobMatch[1]);
+    if (!job) return json({ error: "Job not found." }, 404);
+    if (job.status === "running" || job.status === "queued") {
+      return json({ error: "You can remove history only after the job finishes." }, 409);
+    }
+
+    await deleteIfExists(`${historyRoot}\\${job.id}`);
+
+    return json({ ok: true, id: job.id });
   }
 
   return json({ error: "Not found." }, 404);

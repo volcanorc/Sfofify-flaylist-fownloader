@@ -3,32 +3,38 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>spotDL Local Downloader</title>
+  <title>Spotify Playlist Downloader</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <main class="shell">
-    <section class="hero">
-      <p class="eyebrow">Local Playlist Downloader</p>
-      <h1>Paste a Spotify playlist URL and let this folder do the rest.</h1>
-      <p class="lede">Runs fully on your PC with the local <code>spotdl</code> setup in this folder. Each playlist download gets its own separate output folder automatically.</p>
+    <section class="hero panel">
+      <p class="eyebrow">Spotify Playlist Downloader</p>
+      <h1>Paste a Spotify playlist URL and let us do the rest.</h1>
+      <p class="lede">Runs fully on your PC, prepares its own local setup, and saves finished music inside the <code>downloads</code> folder in this source folder.</p>
+      <div class="hero-notes">
+        <span>Local-only setup</span>
+        <span>Separate playlist folders</span>
+        <span>Fallback retries built in</span>
+      </div>
     </section>
 
-    <section class="panel">
+    <section class="panel composer">
       <form id="download-form" class="stack">
         <label for="playlist-url">Spotify playlist URL</label>
-        <div class="row">
-          <input id="playlist-url" name="url" type="url" placeholder="https://open.spotify.com/playlist/..." required>
-          <button type="submit">Start Download</button>
-        </div>
-        <p class="hint">Behavior: saves playlist metadata first, downloads the playlist, then retries remaining missing tracks with fallback providers one-by-one.</p>
+        <input id="playlist-url" name="url" type="url" placeholder="https://open.spotify.com/playlist/..." required>
+        <button type="submit">Start Download</button>
+        <p class="hint">Paste a playlist link, then the app handles metadata, matching, downloading, retries, and logs for you.</p>
       </form>
       <p id="form-message" class="message"></p>
     </section>
 
-    <section class="panel">
+    <section class="panel jobs-panel">
       <div class="section-head">
-        <h2>Jobs</h2>
+        <div>
+          <p class="eyebrow small">Recent jobs</p>
+          <h2>Downloads</h2>
+        </div>
         <button id="refresh-jobs" type="button" class="ghost">Refresh</button>
       </div>
       <div id="jobs" class="jobs"></div>
@@ -38,23 +44,46 @@
   <template id="job-template">
     <article class="job">
       <div class="job-top">
-        <div>
+        <div class="job-heading">
           <h3 class="job-title"></h3>
           <p class="job-url"></p>
         </div>
         <span class="badge"></span>
       </div>
+
       <div class="meta"></div>
+
+      <section class="log-preview-wrap">
+        <div class="preview-head">
+          <h4>Latest activity</h4>
+          <div class="preview-actions">
+            <button type="button" class="log-button">See more</button>
+            <button type="button" class="remove-button">Remove</button>
+          </div>
+        </div>
+        <pre class="log-preview"></pre>
+      </section>
+
       <div class="missing-wrap">
         <h4>Missing songs</h4>
         <ul class="missing-list"></ul>
       </div>
-      <div class="log-wrap">
-        <h4>Full log</h4>
-        <pre class="log"></pre>
-      </div>
     </article>
   </template>
+
+  <dialog id="log-modal" class="log-modal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow small">Full log</p>
+          <h3 id="modal-title">Job log</h3>
+        </div>
+        <button id="close-log-modal" type="button" class="ghost">Close</button>
+      </div>
+      <p id="modal-summary" class="modal-summary"></p>
+      <pre id="modal-log" class="log"></pre>
+    </div>
+  </dialog>
 
   <script src="/app.js"></script>
 </body>
