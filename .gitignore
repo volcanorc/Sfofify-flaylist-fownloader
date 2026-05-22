@@ -1,0 +1,10 @@
+.cache/
+.deno/
+.spotdl/
+.tools/
+app-data/
+downloads/
+*.spotdl
+*.log
+*.tmp
+
