@@ -80,13 +80,22 @@ function setMessage(text, type = "") {
 function showToast(message, type = "success") {
   if (!toastStackEl) return;
 
+  const metaByType = {
+    success: { title: "Download started", duration: 2000 },
+    retry: { title: "Retry started", duration: 2000 },
+    canceled: { title: "Canceled", duration: 2000 },
+    deleted: { title: "Deleted", duration: 2000 },
+    notice: { title: "Notice", duration: 2000 },
+  };
+  const meta = metaByType[type] || metaByType.notice;
+
   const toast = document.createElement("div");
   toast.className = "toast";
   toast.dataset.type = type;
   toast.innerHTML = `
     <div class="toast-accent"></div>
     <div class="toast-copy">
-      <p class="toast-title">${type === "success" ? "Download started" : "Notice"}</p>
+      <p class="toast-title">${meta.title}</p>
       <p class="toast-message">${escapeHtml(message)}</p>
     </div>
   `;
@@ -104,7 +113,7 @@ function showToast(message, type = "success") {
     }, 220);
   };
 
-  window.setTimeout(dismiss, 2000);
+  window.setTimeout(dismiss, meta.duration);
 }
 
 function escapeHtml(value) {
@@ -475,6 +484,7 @@ async function removeJob(job) {
     activeLogs.delete(job.id);
     jobStateCache.delete(job.id);
     setMessage(`Removed saved history for "${formatJobTitle(job)}".`, "success");
+    showToast(`Deleted ${formatJobTitle(job)} from saved history.`, "deleted");
 
     if (!jobs.length) {
       jobsEl.innerHTML = '<p class="empty">No saved jobs yet.</p>';
@@ -490,6 +500,7 @@ async function cancelJob(job) {
   jobStateCache.delete(job.id);
   lastJobsSignature = "";
   setMessage(`Canceled "${formatJobTitle(job)}".`, "success");
+  showToast(`Canceled ${formatJobTitle(job)}.`, "canceled");
   await renderJobs();
 }
 
@@ -502,6 +513,7 @@ async function retryJob(job) {
   clearCollapsedState(job.id);
   setCollapsedState(nextJob.id, wasCollapsed);
   setMessage(`Retry started for "${formatJobTitle(job)}".`, "success");
+  showToast(`Retrying ${formatJobTitle(job)}.`, "retry");
   await renderJobs();
   return nextJob;
 }
