@@ -35,7 +35,6 @@
           <p class="eyebrow small">Recent jobs</p>
           <h2>Downloads</h2>
         </div>
-        <button id="refresh-jobs" type="button" class="ghost">Refresh</button>
       </div>
       <div id="jobs" class="jobs"></div>
     </section>
@@ -48,13 +47,18 @@
           <h3 class="job-title"></h3>
           <p class="job-url"></p>
         </div>
-        <span class="badge"></span>
+        <div class="job-top-actions">
+          <span class="badge"></span>
+          <button type="button" class="toggle-collapse-button ghost icon-button" aria-label="Minimize">-</button>
+        </div>
       </div>
 
       <div class="compact-row">
         <div class="compact-summary"></div>
         <div class="compact-actions">
+          <button type="button" class="compact-toggle-button ghost">Expand</button>
           <button type="button" class="compact-open-folder-button">Open Folder</button>
+          <button type="button" class="compact-cancel-button">Cancel</button>
           <button type="button" class="compact-retry-button">Retry</button>
           <button type="button" class="compact-log-button ghost">Show log</button>
           <button type="button" class="compact-remove-button icon-button ghost" aria-label="Delete saved history">X</button>
@@ -77,11 +81,10 @@
           <div class="preview-actions">
             <button type="button" class="open-folder-button">Open Folder</button>
             <button type="button" class="cancel-button">Cancel</button>
-            <button type="button" class="log-button">See more</button>
-            <button type="button" class="remove-button icon-button" aria-label="Delete saved history">X</button>
+            <button type="button" class="log-button">Show log</button>
           </div>
         </div>
-        <pre class="log-preview"></pre>
+        <div class="log-preview"></div>
       </section>
 
       <div class="missing-wrap">
@@ -101,7 +104,7 @@
         <button id="close-log-modal" type="button" class="ghost">Close</button>
       </div>
       <p id="modal-summary" class="modal-summary"></p>
-      <pre id="modal-log" class="log"></pre>
+      <div id="modal-log" class="log"></div>
     </div>
   </dialog>
 

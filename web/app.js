@@ -14,7 +14,37 @@ const activeLogs = new Map();
 const jobElements = new Map();
 const jobStateCache = new Map();
 const deletingJobs = new Set();
+const collapsedStateKey = "spotdl-job-collapsed-state";
 let lastJobsSignature = "";
+
+function readCollapsedState() {
+  try {
+    return JSON.parse(localStorage.getItem(collapsedStateKey) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function writeCollapsedState(nextState) {
+  localStorage.setItem(collapsedStateKey, JSON.stringify(nextState));
+}
+
+function getCollapsedState(jobId) {
+  const state = readCollapsedState();
+  return state[jobId];
+}
+
+function setCollapsedState(jobId, collapsed) {
+  const state = readCollapsedState();
+  state[jobId] = collapsed;
+  writeCollapsedState(state);
+}
+
+function clearCollapsedState(jobId) {
+  const state = readCollapsedState();
+  delete state[jobId];
+  writeCollapsedState(state);
+}
 
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, options);
@@ -25,11 +55,15 @@ async function fetchJson(url, options = {}) {
   return data;
 }
 
-async function startJob(url, retryOf = null) {
+async function startJob(url, options = {}) {
   const job = await fetchJson("/api/downloads", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url, retryOf }),
+    body: JSON.stringify({
+      url,
+      retryOf: options.retryOf || null,
+      resumeOnlyMissing: options.resumeOnlyMissing === true,
+    }),
   });
   activeLogs.delete(job.id);
   jobStateCache.delete(job.id);
@@ -62,32 +96,53 @@ function isRetryable(job) {
   return job.status === "failed" || job.status === "canceled";
 }
 
-function isCompactJob(job) {
+function getDefaultCollapsed(job) {
   return job.status === "completed" || job.status === "canceled" || job.status === "failed";
+}
+
+function isCollapsedJob(job) {
+  const saved = getCollapsedState(job.id);
+  if (typeof saved === "boolean") {
+    return saved;
+  }
+  return getDefaultCollapsed(job);
 }
 
 function getCompactSummary(job) {
   const title = formatJobTitle(job);
+  const total = job.uniqueTrackCount || job.trackCount || 0;
+  const downloadedLabel = total > 0
+    ? `Downloaded files ${job.downloadedCount || 0}/${total}`
+    : job.downloadedCount > 0
+      ? `Downloaded files ${job.downloadedCount || 0}`
+      : "";
+
+  if (job.status === "running" || job.status === "queued") {
+    return {
+      title,
+      status: "running",
+      detail: downloadedLabel || (job.phase === "Queued" ? "Queued" : "Working"),
+    };
+  }
   if (job.status === "completed") {
-    const total = job.uniqueTrackCount || job.trackCount || job.downloadedCount || 0;
     return {
       title,
       status: "completed",
-      detail: `Downloaded files ${job.downloadedCount || 0}/${total}`,
+      detail: downloadedLabel || "Completed",
     };
   }
   if (job.status === "canceled") {
     return {
       title,
       status: "canceled",
-      detail: "Canceled",
+      detail: downloadedLabel || "Canceled",
     };
   }
   if (job.status === "failed") {
     return {
       title,
       status: "failed",
-      detail: "Failed",
+      detail: downloadedLabel || "Failed",
     };
   }
   return {
@@ -158,7 +213,11 @@ function getProgressModel(job, rawLog) {
     note = getMatchingNote(job);
   } else if (job.phase === "Downloading files") {
     activeKey = "downloading";
-    if (job.downloadedCount > 0) {
+    if (job.urlType === "artist") {
+      note = job.downloadedCount > 0
+        ? `Downloading songs from this artist. ${job.downloadedCount} file${job.downloadedCount === 1 ? "" : "s"} saved so far.`
+        : (job.currentProviderPhase || "Downloading songs from this artist.");
+    } else if (job.downloadedCount > 0) {
       note = `Downloading is in progress. ${job.downloadedCount} file${job.downloadedCount === 1 ? "" : "s"} saved so far.`;
     } else {
       note = job.currentProviderPhase || "Starting the first download pass.";
@@ -206,7 +265,6 @@ function formatMeta(job) {
   const lines = [];
   lines.push(`Stage: ${formatPhase(job.phase)}`);
   if (job.trackCount) lines.push(`Tracks found: ${job.trackCount}`);
-  if (job.uniqueTrackCount) lines.push(`Unique tracks: ${job.uniqueTrackCount}`);
   if (job.uniqueTrackCount && job.phase !== "Finished") {
     lines.push(`Matches resolved: ${Math.min(job.matchCount || 0, job.uniqueTrackCount)} / ${job.uniqueTrackCount}`);
   }
@@ -214,8 +272,6 @@ function formatMeta(job) {
   if (job.missingCount !== null && job.missingCount !== undefined) {
     lines.push(`Files left: ${job.missingCount}`);
   }
-  const folder = formatFolder(job);
-  if (folder) lines.push(`Saved in: downloads\\${folder}`);
   if (job.error) lines.push(`Problem: ${job.error}`);
   return lines.map(line => `<span>${escapeHtml(line)}</span>`).join("");
 }
@@ -235,13 +291,14 @@ function getLogLineVariant(line) {
     /Could not get/i.test(bare) ||
     /^Worker failed:/i.test(bare) ||
     /^The downloader stopped:/i.test(bare) ||
-    /^AudioProviderError:/i.test(bare) ||
     /^LookupError:/i.test(bare)
   ) {
     return "error";
   }
 
   if (
+    /^AudioProviderError:\s*YT-DLP download error/i.test(bare) ||
+    /^AudioProviderError:/i.test(bare) ||
     /^Retrying/i.test(bare) ||
     /logging error/i.test(bare) ||
     /live event will begin in/i.test(bare) ||
@@ -299,6 +356,7 @@ function humanizeLine(line) {
   if (bare.startsWith("Worker failed: --- Logging error ---")) return formatted.replace(bare, "The provider emitted a logging error. The downloader will try safer fallbacks where possible.");
   if (bare.startsWith("Worker failed:")) return formatted.replace(bare, bare.replace("Worker failed:", "The downloader stopped:"));
   if (bare.startsWith("--- Logging error ---")) return formatted.replace(bare, "The provider emitted a logging error. Fallbacks may still continue.");
+  if (/^AudioProviderError:\s*YT-DLP download error/i.test(bare)) return formatted.replace(bare, "A source download failed. Trying safer fallback sources.");
   if (bare.startsWith("Finished. Downloaded files:")) {
     return formatted.replace(
       bare,
@@ -321,7 +379,7 @@ function renderLogMarkup(logText, emptyLabel = "No log output yet.") {
     const human = humanizeLine(line);
     const variant = getLogLineVariant(human);
     return `<span class="log-line" data-variant="${variant}">${escapeHtml(human)}</span>`;
-  }).join("\n");
+  }).join("");
 }
 
 function getLatestHumanLine(logText) {
@@ -342,8 +400,9 @@ async function loadLog(jobId, force = false) {
 }
 
 function renderMissingSongs(job, listEl) {
+  const missingSongs = Array.isArray(job.missingSongs) ? job.missingSongs : [];
   listEl.innerHTML = "";
-  if (!job.missingSongs || job.missingSongs.length === 0) {
+  if (missingSongs.length === 0) {
     const li = document.createElement("li");
     li.textContent = "None";
     li.className = "empty-state";
@@ -351,7 +410,7 @@ function renderMissingSongs(job, listEl) {
     return;
   }
 
-  for (const song of job.missingSongs) {
+  for (const song of missingSongs) {
     const li = document.createElement("li");
     li.textContent = `${song.artist} - ${song.title}`;
     listEl.appendChild(li);
@@ -369,6 +428,7 @@ async function removeJob(job) {
   await fetchJson(`/api/jobs/${job.id}`, { method: "DELETE" });
   deletingJobs.add(job.id);
   try {
+    clearCollapsedState(job.id);
     lastJobsSignature = "";
     const data = await fetchJson("/api/jobs");
     const jobs = data.jobs || [];
@@ -403,7 +463,13 @@ async function cancelJob(job) {
 }
 
 async function retryJob(job) {
-  const nextJob = await startJob(job.url, job.id);
+  const wasCollapsed = isCollapsedJob(job);
+  const nextJob = await startJob(job.url, {
+    retryOf: job.id,
+    resumeOnlyMissing: job.urlType !== "artist",
+  });
+  clearCollapsedState(job.id);
+  setCollapsedState(nextJob.id, wasCollapsed);
   setMessage(`Retry started for "${formatJobTitle(job)}".`, "success");
   await renderJobs();
   return nextJob;
@@ -425,19 +491,22 @@ function ensureJobCard(job) {
     urlEl: fragment.querySelector(".job-url"),
     badgeEl: fragment.querySelector(".badge"),
     compactSummaryEl: fragment.querySelector(".compact-summary"),
+    compactToggleButtonEl: fragment.querySelector(".compact-toggle-button"),
     compactOpenFolderButtonEl: fragment.querySelector(".compact-open-folder-button"),
+    compactCancelButtonEl: fragment.querySelector(".compact-cancel-button"),
     compactRetryButtonEl: fragment.querySelector(".compact-retry-button"),
     compactLogButtonEl: fragment.querySelector(".compact-log-button"),
     compactRemoveButtonEl: fragment.querySelector(".compact-remove-button"),
     metaEl: fragment.querySelector(".meta"),
     progressNoteEl: fragment.querySelector(".progress-note"),
     progressStepsEl: fragment.querySelector(".progress-steps"),
+    missingWrapEl: fragment.querySelector(".missing-wrap"),
     missingEl: fragment.querySelector(".missing-list"),
     previewEl: fragment.querySelector(".log-preview"),
+    toggleCollapseButtonEl: fragment.querySelector(".toggle-collapse-button"),
     openFolderButtonEl: fragment.querySelector(".open-folder-button"),
     cancelButtonEl: fragment.querySelector(".cancel-button"),
     logButtonEl: fragment.querySelector(".log-button"),
-    removeButtonEl: fragment.querySelector(".remove-button"),
   };
 
   card._refs = refs;
@@ -455,27 +524,31 @@ async function upsertJob(job) {
     urlEl,
     badgeEl,
     compactSummaryEl,
+    compactToggleButtonEl,
     compactOpenFolderButtonEl,
+    compactCancelButtonEl,
     compactRetryButtonEl,
     compactLogButtonEl,
     compactRemoveButtonEl,
     metaEl,
     progressNoteEl,
     progressStepsEl,
+    missingWrapEl,
     missingEl,
     previewEl,
+    toggleCollapseButtonEl,
     openFolderButtonEl,
     cancelButtonEl,
     logButtonEl,
-    removeButtonEl,
   } = card._refs;
 
   const previousState = jobStateCache.get(job.id);
   const shouldReloadLog = !previousState || previousState.updatedAt !== job.updatedAt || previousState.status !== job.status;
   const rawLog = await loadLog(job.id, shouldReloadLog).catch(error => `Unable to load log: ${error.message}`);
 
+  const collapsed = isCollapsedJob(job);
   card.dataset.status = job.status;
-  card.dataset.compact = isCompactJob(job) ? "true" : "false";
+  card.dataset.collapsed = collapsed ? "true" : "false";
   titleEl.textContent = formatJobTitle(job);
   urlEl.textContent = job.url;
   badgeEl.textContent = job.status;
@@ -495,19 +568,30 @@ async function upsertJob(job) {
       : "";
     return `<div class="progress-step" data-state="${step.state}"><div class="progress-step-main"><span class="progress-pill">${dot}</span><span class="progress-step-label">${escapeHtml(step.label)}</span></div>${badgeHtml}</div>`;
   }).join("");
+  missingWrapEl.hidden = !job.missingSongsKnown;
   renderMissingSongs(job, missingEl);
   previewEl.innerHTML = renderLogMarkup(getLogLines(rawLog).slice(-4).join("\n"), "No log output yet.");
   previewEl.dataset.error = job.error ? "true" : "false";
 
+  toggleCollapseButtonEl.textContent = "-";
+  toggleCollapseButtonEl.setAttribute("aria-label", "Minimize");
+  compactToggleButtonEl.textContent = "Expand";
   openFolderButtonEl.disabled = !job.outputFolder;
   cancelButtonEl.textContent = isRetryable(job) ? "Retry" : "Cancel";
   cancelButtonEl.disabled = !(job.status === "running" || job.status === "queued" || isRetryable(job));
-  removeButtonEl.disabled = job.status === "running" || job.status === "queued";
   compactOpenFolderButtonEl.disabled = !job.outputFolder || job.status !== "completed";
+  compactCancelButtonEl.disabled = !(job.status === "running" || job.status === "queued");
   compactRetryButtonEl.disabled = !isRetryable(job);
   compactLogButtonEl.disabled = false;
-  compactRemoveButtonEl.disabled = job.status === "running" || job.status === "queued";
+  compactRemoveButtonEl.disabled = !(collapsed && (job.status === "completed" || job.status === "failed" || job.status === "canceled"));
 
+  const toggleCollapsed = () => {
+    setCollapsedState(job.id, !collapsed);
+    lastJobsSignature = "";
+    renderJobs().catch(error => setMessage(error.message, "error"));
+  };
+  toggleCollapseButtonEl.onclick = toggleCollapsed;
+  compactToggleButtonEl.onclick = toggleCollapsed;
   openFolderButtonEl.onclick = () => {
     if (!job.outputFolder) return;
     openFolder(job).catch(error => setMessage(error.message, "error"));
@@ -520,12 +604,13 @@ async function upsertJob(job) {
     cancelJob(job).catch(error => setMessage(error.message, "error"));
   };
   logButtonEl.onclick = () => openLogModal(job, rawLog);
-  removeButtonEl.onclick = () => {
-    removeJob(job).catch(error => setMessage(error.message, "error"));
-  };
   compactOpenFolderButtonEl.onclick = () => {
     if (!job.outputFolder || job.status !== "completed") return;
     openFolder(job).catch(error => setMessage(error.message, "error"));
+  };
+  compactCancelButtonEl.onclick = () => {
+    if (!(job.status === "running" || job.status === "queued")) return;
+    cancelJob(job).catch(error => setMessage(error.message, "error"));
   };
   compactRetryButtonEl.onclick = () => {
     if (!isRetryable(job)) return;
@@ -548,7 +633,7 @@ async function upsertJob(job) {
 
 async function renderJobs() {
   const data = await fetchJson("/api/jobs");
-  const jobs = (data.jobs || []).filter(job => !deletingJobs.has(job.id));
+  const jobs = (data.jobs || []).filter(job => !deletingJobs.has(job.id) && !job.replacedByJobId);
 
   const signature = JSON.stringify(
     jobs.map(job => ({
@@ -560,6 +645,8 @@ async function renderJobs() {
       currentProviderPhase: job.currentProviderPhase,
       downloadedCount: job.downloadedCount,
       missingCount: job.missingCount,
+      missingSongsKnown: job.missingSongsKnown,
+      replacedByJobId: job.replacedByJobId,
       updatedAt: job.updatedAt,
       error: job.error,
     }))
@@ -615,10 +702,12 @@ form.addEventListener("submit", async event => {
   }
 });
 
-refreshBtn.addEventListener("click", () => {
-  lastJobsSignature = "";
-  renderJobs().catch(error => setMessage(error.message, "error"));
-});
+if (refreshBtn) {
+  refreshBtn.addEventListener("click", () => {
+    lastJobsSignature = "";
+    renderJobs().catch(error => setMessage(error.message, "error"));
+  });
+}
 
 closeLogModal.addEventListener("click", () => {
   logModal.close();

@@ -178,6 +178,12 @@ label {
   gap: 14px;
 }
 
+.job-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 input {
   width: 100%;
   border: 1px solid rgba(147, 167, 202, 0.14);
@@ -231,8 +237,9 @@ button.ghost,
 .open-folder-button,
 .cancel-button,
 .log-button,
-.remove-button,
+.compact-toggle-button,
 .compact-open-folder-button,
+.compact-cancel-button,
 .compact-retry-button,
 .compact-log-button,
 .compact-remove-button {
@@ -246,11 +253,15 @@ button.ghost,
   color: var(--accent-strong);
 }
 
-.cancel-button {
+.cancel-button,
+.compact-cancel-button {
+  color: var(--error);
+}
+
+.compact-retry-button {
   color: var(--warn);
 }
 
-.remove-button,
 .compact-remove-button {
   color: var(--error);
 }
@@ -343,9 +354,9 @@ button.ghost,
 
 .job[data-status="running"] .badge,
 .job[data-status="queued"] .badge {
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  border-color: rgba(138, 180, 248, 0.28);
+  background: var(--warn-soft);
+  color: var(--warn-strong);
+  border-color: rgba(253, 214, 99, 0.28);
 }
 
 .job[data-status="completed"] .badge {
@@ -354,14 +365,25 @@ button.ghost,
   border-color: rgba(129, 201, 149, 0.28);
 }
 
-.job[data-status="completed"][data-compact="true"] {
+.job[data-status="completed"][data-collapsed="true"] {
   background: rgba(129, 201, 149, 0.12);
   border-color: rgba(129, 201, 149, 0.22);
 }
 
-.job[data-status="failed"][data-compact="true"] {
+.job[data-status="failed"][data-collapsed="true"] {
   background: rgba(242, 139, 130, 0.1);
   border-color: rgba(242, 139, 130, 0.2);
+}
+
+.job[data-status="running"],
+.job[data-status="queued"] {
+  border-color: rgba(253, 214, 99, 0.16);
+}
+
+.job[data-status="running"][data-collapsed="true"],
+.job[data-status="queued"][data-collapsed="true"] {
+  background: rgba(253, 214, 99, 0.12);
+  border-color: rgba(253, 214, 99, 0.24);
 }
 
 .job[data-status="canceled"] .badge {
@@ -370,15 +392,9 @@ button.ghost,
   border-color: rgba(245, 248, 255, 0.12);
 }
 
-.job[data-status="canceled"] {
-  opacity: 0.68;
-}
-
-.job[data-status="canceled"] .meta span,
-.job[data-status="canceled"] .progress-note,
-.job[data-status="canceled"] .log-preview,
-.job[data-status="canceled"] .missing-list {
-  opacity: 0.82;
+.job[data-status="canceled"][data-collapsed="true"] {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(245, 248, 255, 0.12);
 }
 
 .meta {
@@ -388,19 +404,19 @@ button.ghost,
   margin-top: 16px;
 }
 
-.job[data-compact="true"] .job-url,
-.job[data-compact="true"] .meta,
-.job[data-compact="true"] .progress-wrap,
-.job[data-compact="true"] .log-preview-wrap,
-.job[data-compact="true"] .missing-wrap {
+.job[data-collapsed="true"] .job-url,
+.job[data-collapsed="true"] .meta,
+.job[data-collapsed="true"] .progress-wrap,
+.job[data-collapsed="true"] .log-preview-wrap,
+.job[data-collapsed="true"] .missing-wrap {
   display: none;
 }
 
-.job[data-compact="true"] .job-top {
+.job[data-collapsed="true"] .job-top {
   display: none;
 }
 
-.job[data-compact="true"] .compact-row {
+.job[data-collapsed="true"] .compact-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -431,6 +447,22 @@ button.ghost,
   text-transform: capitalize;
 }
 
+.compact-status[data-status="running"],
+.compact-status[data-status="queued"] {
+  color: var(--warn-strong);
+}
+
+.compact-status[data-status="running"]::after,
+.compact-status[data-status="queued"]::after {
+  content: "...";
+  display: inline-block;
+  margin-left: 2px;
+  width: 1.1em;
+  overflow: hidden;
+  vertical-align: bottom;
+  animation: dots 1.2s steps(4, end) infinite;
+}
+
 .compact-status[data-status="completed"] {
   color: var(--success-strong);
 }
@@ -454,7 +486,9 @@ button.ghost,
 }
 
 .compact-open-folder-button:disabled,
-.compact-retry-button:disabled {
+.compact-cancel-button:disabled,
+.compact-retry-button:disabled,
+.compact-remove-button:disabled {
   display: none;
 }
 
@@ -586,6 +620,7 @@ button.ghost,
 
 .log-line {
   display: block;
+  margin: 0;
 }
 
 .log-line[data-variant="info"] {
@@ -689,12 +724,16 @@ code {
     align-items: stretch;
   }
 
+  .job-top-actions {
+    justify-content: space-between;
+  }
+
   .preview-actions {
     width: 100%;
     flex-direction: column;
   }
 
-  .job[data-compact="true"] .compact-row,
+  .job[data-collapsed="true"] .compact-row,
   .compact-actions {
     width: 100%;
     flex-direction: column;
@@ -719,7 +758,7 @@ code {
   .open-folder-button,
   .cancel-button,
   .log-button,
-  .remove-button,
+  .compact-toggle-button,
   input {
     width: 100%;
   }
