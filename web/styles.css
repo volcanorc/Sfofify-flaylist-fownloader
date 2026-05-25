@@ -52,6 +52,59 @@ body::before {
     linear-gradient(315deg, rgba(125, 211, 252, 0.04), transparent 40%);
 }
 
+.toast-stack {
+  position: fixed;
+  left: 22px;
+  bottom: 22px;
+  z-index: 30;
+  display: grid;
+  gap: 10px;
+  width: min(360px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.toast {
+  display: grid;
+  grid-template-columns: 5px 1fr;
+  align-items: stretch;
+  border-radius: 18px;
+  border: 1px solid rgba(129, 201, 149, 0.24);
+  background: linear-gradient(180deg, rgba(20, 43, 31, 0.96), rgba(14, 31, 24, 0.98));
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.34);
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.toast[data-visible="true"] {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.toast-accent {
+  background: linear-gradient(180deg, #81c995, #5bb974);
+}
+
+.toast-copy {
+  padding: 12px 14px 13px;
+}
+
+.toast-title {
+  margin: 0;
+  color: var(--success-strong);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.toast-message {
+  margin: 4px 0 0;
+  color: rgba(245, 248, 255, 0.9);
+  font-size: 0.92rem;
+  line-height: 1.4;
+}
+
 .shell {
   width: min(1040px, calc(100% - 28px));
   min-height: 100vh;
@@ -236,6 +289,7 @@ button:disabled:hover {
 button.ghost,
 .open-folder-button,
 .cancel-button,
+.retry-button,
 .log-button,
 .compact-toggle-button,
 .compact-open-folder-button,
@@ -258,6 +312,7 @@ button.ghost,
   color: var(--error);
 }
 
+.retry-button,
 .compact-retry-button {
   color: var(--warn);
 }

@@ -3,6 +3,7 @@ const input = document.querySelector("#playlist-url");
 const jobsEl = document.querySelector("#jobs");
 const messageEl = document.querySelector("#form-message");
 const refreshBtn = document.querySelector("#refresh-jobs");
+const toastStackEl = document.querySelector("#toast-stack");
 const template = document.querySelector("#job-template");
 const logModal = document.querySelector("#log-modal");
 const modalTitle = document.querySelector("#modal-title");
@@ -74,6 +75,36 @@ async function startJob(url, options = {}) {
 function setMessage(text, type = "") {
   messageEl.textContent = text;
   messageEl.className = `message ${type}`.trim();
+}
+
+function showToast(message, type = "success") {
+  if (!toastStackEl) return;
+
+  const toast = document.createElement("div");
+  toast.className = "toast";
+  toast.dataset.type = type;
+  toast.innerHTML = `
+    <div class="toast-accent"></div>
+    <div class="toast-copy">
+      <p class="toast-title">${type === "success" ? "Download started" : "Notice"}</p>
+      <p class="toast-message">${escapeHtml(message)}</p>
+    </div>
+  `;
+
+  toastStackEl.appendChild(toast);
+
+  requestAnimationFrame(() => {
+    toast.dataset.visible = "true";
+  });
+
+  const dismiss = () => {
+    toast.dataset.visible = "false";
+    window.setTimeout(() => {
+      toast.remove();
+    }, 220);
+  };
+
+  window.setTimeout(dismiss, 2000);
 }
 
 function escapeHtml(value) {
@@ -506,6 +537,7 @@ function ensureJobCard(job) {
     toggleCollapseButtonEl: fragment.querySelector(".toggle-collapse-button"),
     openFolderButtonEl: fragment.querySelector(".open-folder-button"),
     cancelButtonEl: fragment.querySelector(".cancel-button"),
+    retryButtonEl: fragment.querySelector(".retry-button"),
     logButtonEl: fragment.querySelector(".log-button"),
   };
 
@@ -539,6 +571,7 @@ async function upsertJob(job) {
     toggleCollapseButtonEl,
     openFolderButtonEl,
     cancelButtonEl,
+    retryButtonEl,
     logButtonEl,
   } = card._refs;
 
@@ -577,8 +610,10 @@ async function upsertJob(job) {
   toggleCollapseButtonEl.setAttribute("aria-label", "Minimize");
   compactToggleButtonEl.textContent = "Expand";
   openFolderButtonEl.disabled = !job.outputFolder;
-  cancelButtonEl.textContent = isRetryable(job) ? "Retry" : "Cancel";
-  cancelButtonEl.disabled = !(job.status === "running" || job.status === "queued" || isRetryable(job));
+  cancelButtonEl.hidden = !(job.status === "running" || job.status === "queued");
+  cancelButtonEl.disabled = !(job.status === "running" || job.status === "queued");
+  retryButtonEl.hidden = !isRetryable(job);
+  retryButtonEl.disabled = !isRetryable(job);
   compactOpenFolderButtonEl.disabled = !job.outputFolder || job.status !== "completed";
   compactCancelButtonEl.disabled = !(job.status === "running" || job.status === "queued");
   compactRetryButtonEl.disabled = !isRetryable(job);
@@ -597,11 +632,11 @@ async function upsertJob(job) {
     openFolder(job).catch(error => setMessage(error.message, "error"));
   };
   cancelButtonEl.onclick = () => {
-    if (isRetryable(job)) {
-      retryJob(job).catch(error => setMessage(error.message, "error"));
-      return;
-    }
     cancelJob(job).catch(error => setMessage(error.message, "error"));
+  };
+  retryButtonEl.onclick = () => {
+    if (!isRetryable(job)) return;
+    retryJob(job).catch(error => setMessage(error.message, "error"));
   };
   logButtonEl.onclick = () => openLogModal(job, rawLog);
   compactOpenFolderButtonEl.onclick = () => {
@@ -694,6 +729,7 @@ form.addEventListener("submit", async event => {
     const job = await startJob(url);
     input.value = "";
     setMessage("Job started. We'll keep updating the status below.", "success");
+    showToast(`Started ${formatJobTitle(job)}. We’ll keep tracking it below.`, "success");
     await renderJobs();
   } catch (error) {
     setMessage(error.message, "error");
