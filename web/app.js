@@ -252,15 +252,6 @@ function getProgressModel(job, rawLog) {
   } else if (job.status === "canceled") {
     activeKey = "retrying";
     note = "This playlist was canceled from the app.";
-  } else if (job.phase === "Reading artist profile") {
-    activeKey = "metadata";
-    note = "We are loading the artist profile from Spotify.";
-  } else if (job.phase === "Loading artist releases") {
-    activeKey = "metadata";
-    note = job.currentProviderPhase || "We are loading the artist's releases from Spotify.";
-  } else if (job.phase === "Collecting tracks from the artist catalog") {
-    activeKey = "metadata";
-    note = job.currentProviderPhase || "We are collecting tracks from the artist catalog.";
   } else if (job.phase === "Saving playlist metadata") {
     activeKey = "metadata";
     note = "We are checking the playlist link and collecting song details from Spotify.";

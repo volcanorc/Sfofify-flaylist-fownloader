@@ -317,8 +317,8 @@ function Get-FriendlyWorkerError {
         return "Spotify lookup failed because spotDL could not get a Spotify client token."
     }
 
-    if ($FallbackMessage -match '\(429\)\s+Too Many Requests' -or $logText -match 'Spotify rate-limited the' -or $logText -match 'Spotify temporarily rate-limited artist metadata requests') {
-        return "Spotify temporarily rate-limited artist metadata requests."
+    if ($FallbackMessage -match '\(429\)\s+Too Many Requests' -or $logText -match 'Spotify rate-limited the' -or $logText -match 'Spotify temporarily rate-limited artist metadata requests' -or $logText -match 'Spotify temporarily rate-limited artist top-track lookup') {
+        return "Spotify temporarily rate-limited artist metadata lookup."
     }
 
     if ($logText -match 'Could not get client') {
@@ -339,6 +339,10 @@ function Get-FriendlyWorkerError {
 
     if ($UrlType -eq "artist" -and $logText -match 'artist_albums' -and $logText -match "NoneType' object is not subscriptable") {
         return "Spotify lookup failed because spotDL could not read the artist catalog."
+    }
+
+    if ($UrlType -eq "artist" -and $logText -match 'official Spotify Web API') {
+        return "Spotify lookup failed while spotDL was retrying the artist with the official Spotify API."
     }
 
     if ($logText -match 'This live event will begin in') {
@@ -402,6 +406,25 @@ function Get-SpotifyApiAccessToken {
 
     if ($script:SpotifyApiAccessToken -and $script:SpotifyApiAccessTokenExpiresAt -gt (Get-Date).AddMinutes(2)) {
         return $script:SpotifyApiAccessToken
+    }
+
+    try {
+        $webTokenResponse = Invoke-SpotifyApiRequestWithRetry -Method "Get" -Uri "https://open.spotify.com/get_access_token?reason=transport&productType=web_player" -Headers @{} -JobId $JobId -StageLabel "Spotify web access token"
+        if ($webTokenResponse.accessToken) {
+            $script:SpotifyApiAccessToken = [string]$webTokenResponse.accessToken
+            $expiresAt = $null
+            if ($webTokenResponse.accessTokenExpirationTimestampMs) {
+                try {
+                    $expiresAt = [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$webTokenResponse.accessTokenExpirationTimestampMs).UtcDateTime
+                }
+                catch {
+                }
+            }
+            $script:SpotifyApiAccessTokenExpiresAt = if ($expiresAt) { $expiresAt } else { (Get-Date).AddMinutes(30) }
+            return $script:SpotifyApiAccessToken
+        }
+    }
+    catch {
     }
 
     $config = Get-SpotdlConfig
@@ -495,13 +518,15 @@ function Get-SpotifyApiBackoffSeconds {
         [int]$RetryAfterSeconds
     )
 
+    $maxRetryAfterSeconds = 20
+
     if ($RetryAfterSeconds -gt 0) {
-        return $RetryAfterSeconds
+        return [Math]::Min($RetryAfterSeconds, $maxRetryAfterSeconds)
     }
 
     $baseDelay = [Math]::Min([Math]::Pow(2, [Math]::Max($AttemptNumber - 1, 0)), 20)
     $jitter = Get-Random -Minimum 1 -Maximum 4
-    return [int]([Math]::Min($baseDelay + $jitter, 30))
+    return [int]([Math]::Min($baseDelay + $jitter, $maxRetryAfterSeconds))
 }
 
 function Invoke-SpotifyApiRequestWithRetry {
@@ -556,7 +581,7 @@ function Invoke-SpotifyApiRequestWithRetry {
                     if ($JobId) {
                         Add-WarningLog -Id $JobId -Message ("Spotify kept rate-limiting the {0} request after {1} attempt(s)." -f $StageLabel, $attempt)
                     }
-                    throw ("Spotify temporarily rate-limited artist metadata requests during the {0} request." -f $StageLabel)
+                    throw ("Spotify temporarily rate-limited artist top-track lookup during the {0} request." -f $StageLabel)
                 }
 
                 if ($statusCode -ge 500 -and $statusCode -lt 600 -and $JobId) {
@@ -567,6 +592,12 @@ function Invoke-SpotifyApiRequestWithRetry {
             }
 
             $retryAfterSeconds = Get-SpotifyApiRetryAfterSeconds -Exception $_.Exception
+            if ($statusCode -eq 429 -and $retryAfterSeconds -gt 300) {
+                if ($JobId) {
+                    Add-WarningLog -Id $JobId -Message ("Spotify asked us to wait {0} second(s) for the {1} request. Stopping instead of parking this job for hours." -f $retryAfterSeconds, $StageLabel)
+                }
+                throw ("Spotify temporarily rate-limited artist top-track lookup during the {0} request." -f $StageLabel)
+            }
             $delaySeconds = Get-SpotifyApiBackoffSeconds -AttemptNumber $attempt -RetryAfterSeconds $retryAfterSeconds
             if ($JobId) {
                 if ($statusCode -eq 429) {
@@ -626,9 +657,8 @@ function Save-ArtistCatalogCache {
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$ArtistId,
         [Parameter(Mandatory = $true)][string]$ArtistName,
-        [Parameter(Mandatory = $true)]$Songs,
-        [string[]]$ReleaseIds = @(),
-        [string[]]$ProcessedReleaseIds = @(),
+        [string[]]$TrackUrls = @(),
+        $Songs = @(),
         [bool]$IsComplete = $false
     )
 
@@ -637,8 +667,7 @@ function Save-ArtistCatalogCache {
         artistName = $ArtistName
         cachedAt = [DateTime]::UtcNow.ToString("o")
         isComplete = $IsComplete
-        releaseIds = @($ReleaseIds)
-        processedReleaseIds = @($ProcessedReleaseIds)
+        trackUrls = @($TrackUrls)
         songs = @($Songs)
     } -Path $Path
 }
@@ -711,28 +740,23 @@ function Expand-ArtistToMetadataSongs {
 
     $jobDirectory = Get-JobDirectory -Id $JobId
     $artistCachePath = Join-Path $jobDirectory "artist-cache.json"
+    $job = Read-Job -Id $JobId
     $cachedArtistData = Read-JsonFile -Path $artistCachePath
-    if ($cachedArtistData -and $cachedArtistData.artistName -and $cachedArtistData.isComplete -and @($cachedArtistData.songs).Count -gt 0) {
+    $cachedTrackUrls = if ($cachedArtistData) { @($cachedArtistData.trackUrls) } else { @() }
+
+    if ($cachedArtistData -and $cachedArtistData.artistName -and $cachedArtistData.isComplete -and @($cachedArtistData.songs).Count -gt 0 -and $cachedTrackUrls.Count -gt 0) {
         Add-Log -Id $JobId -Message ("Using cached artist metadata with {0} track(s)." -f @($cachedArtistData.songs).Count)
         Update-Job -Id $JobId -Changes @{
-            phase = "Collecting artist tracks"
+            phase = "Loading artist top tracks"
             playlistName = [string]$cachedArtistData.artistName
             playlistId = $ArtistId
-            currentProviderPhase = "Loaded the saved artist catalog from this job's cache."
+            currentProviderPhase = "Loaded the saved artist top tracks from this job's cache."
         } | Out-Null
 
         return [pscustomobject]@{
             ArtistName = [string]$cachedArtistData.artistName
             Songs = @($cachedArtistData.songs)
         }
-    }
-
-    $cachedSongs = if ($cachedArtistData) { @($cachedArtistData.songs) } else { @() }
-    $cachedReleaseIds = if ($cachedArtistData) { @($cachedArtistData.releaseIds) } else { @() }
-    $processedReleaseIds = if ($cachedArtistData) { @($cachedArtistData.processedReleaseIds) } else { @() }
-
-    if ($cachedArtistData -and $cachedArtistData.artistName -and ($cachedSongs.Count -gt 0 -or $cachedReleaseIds.Count -gt 0)) {
-        Add-Log -Id $JobId -Message ("Resuming the saved artist catalog cache with {0} track(s) and {1} completed release(s)." -f $cachedSongs.Count, $processedReleaseIds.Count)
     }
 
     Add-Log -Id $JobId -Message "Reading artist profile from Spotify."
@@ -748,183 +772,65 @@ function Expand-ArtistToMetadataSongs {
     }
 
     Update-Job -Id $JobId -Changes @{
-        phase = "Loading artist releases"
+        phase = "Loading artist top tracks"
         playlistName = $artist.name
         playlistId = $ArtistId
-        currentProviderPhase = "Fetching albums, singles, and compilations from Spotify."
+        currentProviderPhase = "Fetching Spotify's popular tracks for this artist."
     } | Out-Null
 
     Add-Log -Id $JobId -Message ("Artist found: {0}" -f $artist.name)
-    $albumIds = New-Object System.Collections.Generic.List[string]
-    if ($cachedReleaseIds.Count -gt 0) {
-        Add-Log -Id $JobId -Message ("Using the saved release list with {0} release(s)." -f $cachedReleaseIds.Count)
-        foreach ($cachedReleaseId in $cachedReleaseIds) {
-            if (-not [string]::IsNullOrWhiteSpace([string]$cachedReleaseId)) {
-                $albumIds.Add([string]$cachedReleaseId)
-            }
-        }
+    $trackUrls = @()
+    if ($cachedTrackUrls.Count -gt 0) {
+        Add-Log -Id $JobId -Message ("Using cached artist top tracks with {0} Spotify link(s)." -f $cachedTrackUrls.Count)
+        $trackUrls = @($cachedTrackUrls)
     }
     else {
-        Add-Log -Id $JobId -Message "Loading artist releases from Spotify."
-        $albumItems = Get-SpotifyPagedItems -Uri ("https://api.spotify.com/v1/artists/{0}/albums?include_groups=album,single,compilation&limit=50&offset=0&market=US" -f $ArtistId) -JobId $JobId -StageLabel "artist releases"
-        $seenAlbums = @{}
-
-        foreach ($album in $albumItems) {
-            if ($album.id -and -not $seenAlbums.ContainsKey($album.id)) {
-                $seenAlbums[$album.id] = $true
-                $albumIds.Add([string]$album.id)
-            }
+        Add-Log -Id $JobId -Message "Loading artist top tracks from Spotify."
+        $topTracksResponse = Invoke-SpotifyApiJson -Uri ("https://api.spotify.com/v1/artists/{0}/top-tracks?market=US" -f $ArtistId) -JobId $JobId -StageLabel "artist top tracks"
+        $topTracks = @($topTracksResponse.tracks)
+        if ($topTracks.Count -eq 0) {
+            throw "Spotify returned no popular tracks for this artist."
         }
-    }
 
-    if ($albumIds.Count -eq 0) {
-        throw "Spotify returned no releases for this artist."
-    }
-
-    Save-ArtistCatalogCache -Path $artistCachePath -ArtistId $ArtistId -ArtistName $artist.name -Songs $cachedSongs -ReleaseIds @($albumIds) -ProcessedReleaseIds $processedReleaseIds -IsComplete $false
-    Add-Log -Id $JobId -Message ("Found {0} release(s) to scan." -f $albumIds.Count)
-    Update-Job -Id $JobId -Changes @{
-        phase = "Collecting tracks from the artist catalog"
-        currentProviderPhase = ("Loading tracks from {0} releases." -f $albumIds.Count)
-    } | Out-Null
-
-    $songs = New-Object System.Collections.Generic.List[object]
-    $seenSongs = @{}
-    foreach ($cachedSong in $cachedSongs) {
-        if ($cachedSong -and $cachedSong.song_id -and -not $seenSongs.ContainsKey([string]$cachedSong.song_id)) {
-            $seenSongs[[string]$cachedSong.song_id] = $true
-            $songs.Add($cachedSong)
-        }
-    }
-
-    $processedReleaseLookup = @{}
-    foreach ($processedReleaseId in $processedReleaseIds) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$processedReleaseId)) {
-            $processedReleaseLookup[[string]$processedReleaseId] = $true
-        }
-    }
-
-    for ($index = 0; $index -lt $albumIds.Count; $index++) {
-        $albumId = $albumIds[$index]
-        if ($processedReleaseLookup.ContainsKey($albumId)) {
-            continue
-        }
-        try {
-            Update-Job -Id $JobId -Changes @{
-                currentProviderPhase = ("Collecting tracks from release {0} of {1}." -f ($index + 1), $albumIds.Count)
-            } | Out-Null
-
-            $album = Invoke-SpotifyApiJson -Uri ("https://api.spotify.com/v1/albums/{0}?market=US" -f $albumId) -JobId $JobId -StageLabel ("album details for release {0} of {1}" -f ($index + 1), $albumIds.Count)
-            if (-not $album -or -not $album.id) {
+        $seenTrackUrls = @{}
+        foreach ($track in $topTracks) {
+            $trackUrl = if ($track.external_urls -and $track.external_urls.spotify) { [string]$track.external_urls.spotify } else { "" }
+            if ([string]::IsNullOrWhiteSpace($trackUrl)) {
                 continue
             }
-
-            $tracks = New-Object System.Collections.Generic.List[object]
-            foreach ($track in @($album.tracks.items)) {
-                $tracks.Add($track)
+            if ($seenTrackUrls.ContainsKey($trackUrl)) {
+                continue
             }
-
-            $nextTracksUri = $album.tracks.next
-            $trackPageNumber = 2
-            while ($nextTracksUri) {
-                $trackPage = Invoke-SpotifyApiJson -Uri $nextTracksUri -JobId $JobId -StageLabel ("album tracks for release {0} of {1}, page {2}" -f ($index + 1), $albumIds.Count, $trackPageNumber)
-                foreach ($track in @($trackPage.items)) {
-                    $tracks.Add($track)
-                }
-                $nextTracksUri = $trackPage.next
-                $trackPageNumber += 1
-                if ($nextTracksUri) {
-                    Start-Sleep -Milliseconds 150
-                }
-            }
-
-            $discCount = 1
-            if ($tracks.Count -gt 0) {
-                $discCount = (($tracks | Measure-Object -Property disc_number -Maximum).Maximum)
-                if (-not $discCount) {
-                    $discCount = 1
-                }
-            }
-
-            foreach ($track in $tracks) {
-                if (-not $track.id) {
-                    continue
-                }
-
-                $songKey = [string]$track.id
-                if ($seenSongs.ContainsKey($songKey)) {
-                    continue
-                }
-                $seenSongs[$songKey] = $true
-
-                $trackArtists = @($track.artists | ForEach-Object { $_.name })
-                $trackArtistId = $null
-                if ($track.artists -and $track.artists[0].id) {
-                    $trackArtistId = $track.artists[0].id
-                }
-
-                $releaseDate = if ($album.release_date) { [string]$album.release_date } else { "" }
-                $releaseYear = $null
-                if ($releaseDate -match '^\d{4}') {
-                    $releaseYear = [int]$Matches[0]
-                }
-
-                $songs.Add([pscustomobject]@{
-                    name = $track.name
-                    artists = $trackArtists
-                    artist = if ($trackArtists.Count -gt 0) { $trackArtists[0] } else { $artist.name }
-                    genres = @($artist.genres)
-                    disc_number = if ($track.disc_number) { [int]$track.disc_number } else { 1 }
-                    disc_count = [int]$discCount
-                    album_name = $album.name
-                    album_artist = [string]::Join(", ", @($album.artists | ForEach-Object { $_.name }))
-                    duration = [Math]::Round(([double]$track.duration_ms) / 1000)
-                    year = $releaseYear
-                    date = $releaseDate
-                    track_number = if ($track.track_number) { [int]$track.track_number } else { $null }
-                    tracks_count = if ($album.total_tracks) { [int]$album.total_tracks } else { $tracks.Count }
-                    song_id = $track.id
-                    explicit = [bool]$track.explicit
-                    publisher = if ($album.label) { $album.label } else { "" }
-                    url = $track.external_urls.spotify
-                    isrc = ""
-                    cover_url = if ($album.images -and $album.images[0].url) { $album.images[0].url } else { "" }
-                    copyright_text = if ($album.copyrights -and $album.copyrights[0].text) { $album.copyrights[0].text } else { "" }
-                    download_url = $null
-                    lyrics = $null
-                    popularity = 0
-                    album_id = $album.id
-                    list_name = $artist.name
-                    list_url = $ArtistUrl
-                    list_position = 0
-                    list_length = 0
-                    artist_id = $trackArtistId
-                    album_type = $album.album_type
-                })
-            }
-
-            $processedReleaseLookup[$albumId] = $true
-            $processedReleaseIds = @($processedReleaseLookup.Keys)
-            Save-ArtistCatalogCache -Path $artistCachePath -ArtistId $ArtistId -ArtistName $artist.name -Songs @($songs) -ReleaseIds @($albumIds) -ProcessedReleaseIds $processedReleaseIds -IsComplete $false
-            Start-Sleep -Milliseconds 150
-        }
-        catch {
-            Add-WarningLog -Id $JobId -Message ("Could not expand one release from the artist catalog. Continuing with the rest. Details: {0}" -f $_.Exception.Message)
+            $seenTrackUrls[$trackUrl] = $true
+            $trackUrls += $trackUrl
         }
     }
 
-    $totalSongs = $songs.Count
-    for ($index = 0; $index -lt $songs.Count; $index++) {
-        $songs[$index].list_position = $index + 1
-        $songs[$index].list_length = $totalSongs
+    if ($trackUrls.Count -eq 0) {
+        throw "Spotify returned top tracks, but no usable Spotify track links were available for this artist."
+    }
+
+    Save-ArtistCatalogCache -Path $artistCachePath -ArtistId $ArtistId -ArtistName $artist.name -TrackUrls @($trackUrls) -IsComplete $false
+    Add-Log -Id $JobId -Message ("Preparing metadata for the artist's top tracks ({0} song(s))." -f $trackUrls.Count)
+    Update-Job -Id $JobId -Changes @{
+        phase = "Saving playlist metadata"
+        currentProviderPhase = "Preparing metadata for the artist's top tracks."
+    } | Out-Null
+
+    $saveArgs = @("save") + $trackUrls + @("--save-file", $job.metadataPath)
+    $saveExit = Invoke-SpotdlSaveWithRetry -Arguments $saveArgs -WorkingDirectory $script:Root -JobId $JobId -OperationLabel "Preparing metadata for the artist's top tracks."
+    $songs = @(Read-MetadataSongs -MetadataPath $job.metadataPath)
+
+    if ($saveExit -ne 0 -and $songs.Count -gt 0) {
+        Add-WarningLog -Id $JobId -Message ("Artist metadata finished with some lookup errors. Continuing with {0} saved song(s)." -f $songs.Count)
     }
 
     if ($songs.Count -eq 0) {
-        throw "Spotify returned releases, but no tracks could be collected for this artist."
+        throw "spotDL could not save metadata for this artist's top tracks."
     }
 
-    Add-Log -Id $JobId -Message ("Collected {0} unique track(s) from the artist catalog." -f $songs.Count)
-    Save-ArtistCatalogCache -Path $artistCachePath -ArtistId $ArtistId -ArtistName $artist.name -Songs @($songs) -ReleaseIds @($albumIds) -ProcessedReleaseIds @($albumIds) -IsComplete $true
+    Add-Log -Id $JobId -Message ("Saved {0} top track(s) to the local metadata file." -f $songs.Count)
+    Save-ArtistCatalogCache -Path $artistCachePath -ArtistId $ArtistId -ArtistName $artist.name -TrackUrls @($trackUrls) -Songs @($songs) -IsComplete $true
 
     return [pscustomobject]@{
         ArtistName = $artist.name
@@ -1172,17 +1078,50 @@ function Invoke-SpotdlSaveWithRetry {
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][string]$JobId,
         [Parameter(Mandatory = $true)][string]$OperationLabel,
+        [string]$UrlType = "unknown",
         [int]$MaxAttempts = 2
     )
 
-    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-        $exitCode = Invoke-Spotdl -Arguments $Arguments -WorkingDirectory $WorkingDirectory -JobId $JobId -OperationLabel $OperationLabel
+    $attempts = New-Object System.Collections.Generic.List[object]
+    $attempts.Add([pscustomobject]@{
+        Arguments = $Arguments
+        Label = $OperationLabel
+    })
+
+    if ($UrlType -eq "artist") {
+        $officialApiArgs = @($Arguments + @("--use-official-api", "--max-retries", "5"))
+        $attempts.Add([pscustomobject]@{
+            Arguments = $officialApiArgs
+            Label = "Retrying artist metadata with spotDL's official Spotify API mode."
+        })
+
+        $config = $null
+        try {
+            $config = Get-SpotdlConfig
+        }
+        catch {
+        }
+
+        if ($config -and $config.auth_token) {
+            $authTokenArgs = @($Arguments + @("--use-official-api", "--auth-token", [string]$config.auth_token, "--max-retries", "5"))
+            $attempts.Add([pscustomobject]@{
+                Arguments = $authTokenArgs
+                Label = "Retrying artist metadata with spotDL's official Spotify API mode and the saved auth token."
+            })
+        }
+    }
+
+    $maxAttemptCount = [Math]::Min($attempts.Count, [Math]::Max($MaxAttempts, $attempts.Count))
+    $exitCode = 1
+    for ($attempt = 1; $attempt -le $maxAttemptCount; $attempt++) {
+        $attemptInfo = $attempts[$attempt - 1]
+        $exitCode = Invoke-Spotdl -Arguments $attemptInfo.Arguments -WorkingDirectory $WorkingDirectory -JobId $JobId -OperationLabel $attemptInfo.Label
         if ($exitCode -eq 0) {
             return $exitCode
         }
 
-        if ($attempt -lt $MaxAttempts) {
-            Add-Log -Id $JobId -Message ("Save step failed. Retrying metadata fetch (attempt {0} of {1})." -f ($attempt + 1), $MaxAttempts)
+        if ($attempt -lt $maxAttemptCount) {
+            Add-Log -Id $JobId -Message ("Save step failed. Retrying metadata fetch (attempt {0} of {1})." -f ($attempt + 1), $maxAttemptCount)
             Start-Sleep -Seconds 2
         }
     }
@@ -1220,20 +1159,9 @@ try {
         $songs = Read-MetadataSongs -MetadataPath $job.metadataPath
     }
 
-    if ($songs.Count -eq 0 -and $urlType -eq "artist") {
-        $artistCatalog = Expand-ArtistToMetadataSongs -ArtistId $playlistId -ArtistUrl $job.url -JobId $JobId
-        $songs = @($artistCatalog.Songs)
-        if ($artistCatalog.ArtistName) {
-            $playlistName = [string]$artistCatalog.ArtistName
-        }
-        if ($songs.Count -gt 0) {
-            Write-MetadataSongs -Songs $songs -MetadataPath $job.metadataPath
-            Add-Log -Id $JobId -Message ("Saved {0} artist track(s) to the local metadata file." -f $songs.Count)
-        }
-    }
-    elseif ($songs.Count -eq 0) {
+    if ($songs.Count -eq 0) {
         $saveArgs = @("save", $job.url, "--save-file", $job.metadataPath)
-        $saveExit = Invoke-SpotdlSaveWithRetry -Arguments $saveArgs -WorkingDirectory $script:Root -JobId $JobId -OperationLabel (Get-OperationLabel -Kind "save" -ItemName $urlType)
+        $saveExit = Invoke-SpotdlSaveWithRetry -Arguments $saveArgs -WorkingDirectory $script:Root -JobId $JobId -OperationLabel (Get-OperationLabel -Kind "save" -ItemName $urlType) -UrlType $urlType
         $songs = Read-MetadataSongs -MetadataPath $job.metadataPath
 
         if ($saveExit -ne 0 -and $songs.Count -gt 0) {
