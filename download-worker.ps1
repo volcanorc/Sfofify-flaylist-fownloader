@@ -325,7 +325,11 @@ function Add-WarningLog {
 }
 
 function Test-SpotdlLoggingNoiseLine {
-    param([Parameter(Mandatory = $true)][string]$Line)
+    param([AllowEmptyString()][string]$Line)
+
+    if ([string]::IsNullOrWhiteSpace($Line)) {
+        return $false
+    }
 
     return (
         $Line -match '--- Logging error ---' -or
@@ -677,6 +681,9 @@ function Invoke-SpotdlWithProgress {
     try {
         & $script:SpotdlExe @spotdlArgs 2>&1 | ForEach-Object {
             $line = "$_".TrimEnd()
+            if ([string]::IsNullOrWhiteSpace($line)) {
+                return
+            }
             if (Test-SpotdlLoggingNoiseLine -Line $line) {
                 return
             }
@@ -738,6 +745,9 @@ function Invoke-Spotdl {
     try {
         & $script:SpotdlExe @spotdlArgs 2>&1 | ForEach-Object {
             $line = "$_".TrimEnd()
+            if ([string]::IsNullOrWhiteSpace($line)) {
+                return
+            }
             if (Test-SpotdlLoggingNoiseLine -Line $line) {
                 return
             }
