@@ -214,7 +214,8 @@ function formatPhase(phase) {
 
 function getMatchingNote(job) {
   const total = job.uniqueTrackCount || job.trackCount || 0;
-  const position = Math.min((job.matchCount || 0) + 1, total || 1);
+  const completed = Math.max(job.matchCount || 0, 0);
+  const position = Math.min(completed + 1, total || 1);
 
   if (job.currentSong && total > 0) {
     return `Matching song ${position} of ${total}: ${job.currentSong}`;
@@ -251,12 +252,15 @@ function getProgressModel(job, rawLog) {
   } else if (job.status === "canceled") {
     activeKey = "retrying";
     note = "This playlist was canceled from the app.";
-  } else if (job.phase === "Reading artist releases from Spotify") {
+  } else if (job.phase === "Reading artist profile") {
     activeKey = "metadata";
-    note = "We are reading the artist's albums, singles, and compilations from Spotify.";
+    note = "We are loading the artist profile from Spotify.";
+  } else if (job.phase === "Loading artist releases") {
+    activeKey = "metadata";
+    note = job.currentProviderPhase || "We are loading the artist's releases from Spotify.";
   } else if (job.phase === "Collecting tracks from the artist catalog") {
     activeKey = "metadata";
-    note = job.currentProviderPhase || "Collecting tracks from the artist catalog.";
+    note = job.currentProviderPhase || "We are collecting tracks from the artist catalog.";
   } else if (job.phase === "Saving playlist metadata") {
     activeKey = "metadata";
     note = "We are checking the playlist link and collecting song details from Spotify.";
@@ -344,10 +348,16 @@ function isNoiseLogLine(line) {
   return (
     /--- Logging error ---/.test(bare) ||
     /^Traceback \(most recent call last\):$/.test(bare) ||
+    /^\s*File ".*", line \d+, in .+$/.test(bare) ||
+    /^\+-+\+$/.test(bare) ||
+    /^\|.*\|$/.test(bare) ||
     /^Call stack:$/.test(bare) ||
     /^Logged from file /.test(bare) ||
     /^Message:$/.test(bare) ||
-    /^Arguments:$/.test(bare)
+    /^Arguments:$/.test(bare) ||
+    /^[A-Za-z]:\\.*\\playlist\.spotdl$/i.test(bare) ||
+    /^y?list\.spotdl$/i.test(bare) ||
+    /^https?:\/\/open\.spotify\.com\//i.test(bare)
   );
 }
 
@@ -356,6 +366,7 @@ function getLogLineVariant(line) {
 
   if (
     /generated an exception/i.test(bare) ||
+    /^An error occurred$/i.test(bare) ||
     /Could not get/i.test(bare) ||
     /^Worker failed:/i.test(bare) ||
     /^The downloader stopped:/i.test(bare) ||
@@ -406,12 +417,21 @@ function humanizeLine(line) {
   const formatted = formatTimestamp(line);
   const bare = formatted.replace(/^\[[^\]]+\]\s*/, "");
 
+  if (bare === "Reading Spotify details." || /^Reading Spotify details for /.test(bare)) return formatted;
+  if (bare === "Starting the primary download pass.") return formatted;
+  if (bare === "Checking saved files before retrying only what is still missing.") return formatted;
+  if (/^Retrying .+ with fallback audio sources\.$/.test(bare)) return formatted;
   if (bare.startsWith("Running: spotdl.exe save")) return formatted.replace(bare, "Reading playlist details from Spotify.");
   if (bare.startsWith("Running: spotdl.exe download")) return formatted.replace(bare, "Starting the download pass.");
   if (bare.startsWith("Processing query:")) return formatted.replace(bare, "Looking up the playlist link.");
+  if (/^https?:\/\/open\.spotify\.com\//i.test(bare)) return formatted.replace(bare, "Looking up the playlist link.");
   if (/^Found \d+ songs in /.test(bare)) {
     const count = bare.match(/^Found (\d+) songs/)?.[1] || "";
     return formatted.replace(bare, `Playlist found. ${count} songs detected.`);
+  }
+  if (/^Saved \d+ songs to$/i.test(bare)) {
+    const count = bare.match(/^Saved (\d+) songs to$/i)?.[1] || "";
+    return formatted.replace(bare, `Saved ${count} songs to the local metadata file.`);
   }
   if (bare.startsWith("Downloaded \"")) {
     const name = bare.match(/^Downloaded "(.+?)"/)?.[1];
@@ -424,9 +444,10 @@ function humanizeLine(line) {
   if (bare.startsWith("Worker failed:")) return formatted.replace(bare, bare.replace("Worker failed:", "The downloader stopped:"));
   if (/^AudioProviderError:\s*YT-DLP download error/i.test(bare)) return formatted.replace(bare, "A source download failed. Trying safer fallback sources.");
   if (bare.startsWith("Finished. Downloaded files:")) {
+    const normalized = bare.replace(/Missing songs:\s*\.$/, "Missing songs: 0.");
     return formatted.replace(
       bare,
-      bare
+      normalized
         .replace("Finished. Downloaded files:", "Finished. Files downloaded:")
         .replace("Missing songs:", "Files left:")
     );

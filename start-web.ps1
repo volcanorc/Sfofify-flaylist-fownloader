@@ -88,15 +88,11 @@ function Log-ResolvedTool {
 
     switch ($Tool.Source) {
         "local" {
-            Write-StartupLine "Using repo-local $($Tool.Name)."
+            Write-StartupLine "$($Tool.Name) ready."
         }
         "system" {
-            Write-StartupLine "Using system $($Tool.Name)."
+            Write-StartupLine "$($Tool.Name) ready."
         }
-    }
-
-    if ($Tool.Path) {
-        Write-StartupLine "$($Tool.Name): $($Tool.Path)"
     }
 }
 

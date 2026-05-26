@@ -20,6 +20,11 @@ function Get-JobFile {
     return Join-Path (Join-Path $script:HistoryRoot $Id) "job.json"
 }
 
+function Get-JobDirectory {
+    param([Parameter(Mandatory = $true)][string]$Id)
+    return Join-Path $script:HistoryRoot $Id
+}
+
 function Read-Job {
     param([Parameter(Mandatory = $true)][string]$Id)
     $job = Get-Content (Get-JobFile -Id $Id) -Raw -Encoding utf8 | ConvertFrom-Json
@@ -74,6 +79,30 @@ function Ensure-JobShape {
     Ensure-JobProperty -Job $Job -Name "missingSongsKnown" -DefaultValue $false
     Ensure-JobProperty -Job $Job -Name "replacedByJobId" -DefaultValue $null
     Ensure-JobProperty -Job $Job -Name "error" -DefaultValue $null
+    $Job.missingSongs = @(Get-ArrayValue -Value $Job.missingSongs)
+    if ($null -ne $Job.missingCount) {
+        $Job.missingCount = [int]$Job.missingCount
+    }
+    $Job.downloadedCount = [int]$Job.downloadedCount
+    $Job.matchCount = [int]$Job.matchCount
+}
+
+function Get-ArrayValue {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return @()
+    }
+
+    if ($Value -is [System.Array]) {
+        return @($Value)
+    }
+
+    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
+        return @($Value)
+    }
+
+    return @($Value)
 }
 
 function Update-JobSafe {
@@ -288,6 +317,10 @@ function Get-FriendlyWorkerError {
         return "Spotify lookup failed because spotDL could not get a Spotify client token."
     }
 
+    if ($FallbackMessage -match '\(429\)\s+Too Many Requests' -or $logText -match 'Spotify rate-limited the' -or $logText -match 'Spotify temporarily rate-limited artist metadata requests') {
+        return "Spotify temporarily rate-limited artist metadata requests."
+    }
+
     if ($logText -match 'Could not get client') {
         return "Spotify lookup failed because spotDL could not get a Spotify client."
     }
@@ -300,8 +333,12 @@ function Get-FriendlyWorkerError {
         return "Spotify lookup failed for one or more releases because spotDL could not get album info."
     }
 
-    if ($UrlType -eq "artist" -and $logText -match "artist_albums" -and $logText -match "NoneType' object is not subscriptable") {
-        return "spotDL could not resolve albums for this Spotify artist link."
+    if ($UrlType -eq "artist" -and $logText -match 'Could not get artist') {
+        return "Spotify lookup failed because spotDL could not open this artist page."
+    }
+
+    if ($UrlType -eq "artist" -and $logText -match 'artist_albums' -and $logText -match "NoneType' object is not subscriptable") {
+        return "Spotify lookup failed because spotDL could not read the artist catalog."
     }
 
     if ($logText -match 'This live event will begin in') {
@@ -334,6 +371,9 @@ function Test-SpotdlLoggingNoiseLine {
     return (
         $Line -match '--- Logging error ---' -or
         $Line -match '^Traceback \(most recent call last\):$' -or
+        $Line -match '^\s*File ".*", line \d+, in .+$' -or
+        $Line -match '^\+\-+\+$' -or
+        $Line -match '^\|.*\|$' -or
         $Line -match '^Call stack:$' -or
         $Line -match '^Logged from file ' -or
         $Line -match '^Message:$' -or
@@ -356,6 +396,10 @@ function Get-SpotdlConfig {
 }
 
 function Get-SpotifyApiAccessToken {
+    param(
+        [string]$JobId
+    )
+
     if ($script:SpotifyApiAccessToken -and $script:SpotifyApiAccessTokenExpiresAt -gt (Get-Date).AddMinutes(2)) {
         return $script:SpotifyApiAccessToken
     }
@@ -373,9 +417,9 @@ function Get-SpotifyApiAccessToken {
 
     $pair = "{0}:{1}" -f $config.client_id, $config.client_secret
     $basic = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($pair))
-    $tokenResponse = Invoke-RestMethod -Method Post -Uri "https://accounts.spotify.com/api/token" -Headers @{
+    $tokenResponse = Invoke-SpotifyApiRequestWithRetry -Method "Post" -Uri "https://accounts.spotify.com/api/token" -Headers @{
         Authorization = "Basic $basic"
-    } -ContentType "application/x-www-form-urlencoded" -Body "grant_type=client_credentials"
+    } -ContentType "application/x-www-form-urlencoded" -Body "grant_type=client_credentials" -JobId $JobId -StageLabel "Spotify access token"
 
     if (-not $tokenResponse.access_token) {
         throw "Spotify API did not return an access token."
@@ -387,34 +431,264 @@ function Get-SpotifyApiAccessToken {
     return $script:SpotifyApiAccessToken
 }
 
-function Invoke-SpotifyApiJson {
+function Get-SpotifyApiStatusCode {
+    param([Parameter(Mandatory = $true)]$Exception)
+
+    try {
+        if ($Exception.Response -and $Exception.Response.StatusCode) {
+            return [int]$Exception.Response.StatusCode
+        }
+    }
+    catch {
+    }
+
+    return $null
+}
+
+function Get-SpotifyApiRetryAfterSeconds {
+    param([Parameter(Mandatory = $true)]$Exception)
+
+    try {
+        if (-not $Exception.Response -or -not $Exception.Response.Headers) {
+            return $null
+        }
+
+        $retryAfter = [string]$Exception.Response.Headers["Retry-After"]
+        if ([string]::IsNullOrWhiteSpace($retryAfter)) {
+            return $null
+        }
+
+        $parsedSeconds = 0
+        if ([int]::TryParse($retryAfter, [ref]$parsedSeconds)) {
+            return [Math]::Max($parsedSeconds, 1)
+        }
+
+        $retryAt = $null
+        if ([DateTime]::TryParse($retryAfter, [ref]$retryAt)) {
+            $seconds = [Math]::Ceiling(($retryAt.ToUniversalTime() - [DateTime]::UtcNow).TotalSeconds)
+            return [Math]::Max([int]$seconds, 1)
+        }
+    }
+    catch {
+    }
+
+    return $null
+}
+
+function Test-SpotifyApiTransientFailure {
+    param([int]$StatusCode)
+
+    if ($StatusCode -eq 429) {
+        return $true
+    }
+
+    if ($StatusCode -ge 500 -and $StatusCode -lt 600) {
+        return $true
+    }
+
+    return $false
+}
+
+function Get-SpotifyApiBackoffSeconds {
     param(
-        [Parameter(Mandatory = $true)][string]$Uri
+        [int]$AttemptNumber,
+        [int]$RetryAfterSeconds
     )
 
-    $token = Get-SpotifyApiAccessToken
-    return Invoke-RestMethod -Method Get -Uri $Uri -Headers @{
-        Authorization = "Bearer $token"
+    if ($RetryAfterSeconds -gt 0) {
+        return $RetryAfterSeconds
     }
+
+    $baseDelay = [Math]::Min([Math]::Pow(2, [Math]::Max($AttemptNumber - 1, 0)), 20)
+    $jitter = Get-Random -Minimum 1 -Maximum 4
+    return [int]([Math]::Min($baseDelay + $jitter, 30))
+}
+
+function Invoke-SpotifyApiRequestWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][hashtable]$Headers,
+        [string]$ContentType,
+        $Body,
+        [string]$JobId,
+        [Parameter(Mandatory = $true)][string]$StageLabel,
+        [int]$MaxAttempts = 5,
+        [switch]$AllowTokenRefresh
+    )
+
+    $refreshedToken = $false
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            $invokeParams = @{
+                Method      = $Method
+                Uri         = $Uri
+                Headers     = $Headers
+                ErrorAction = "Stop"
+            }
+
+            if ($PSBoundParameters.ContainsKey("ContentType") -and $null -ne $ContentType) {
+                $invokeParams.ContentType = $ContentType
+            }
+            if ($PSBoundParameters.ContainsKey("Body") -and $null -ne $Body) {
+                $invokeParams.Body = $Body
+            }
+
+            return Invoke-RestMethod @invokeParams
+        }
+        catch {
+            $statusCode = Get-SpotifyApiStatusCode -Exception $_.Exception
+
+            if ($statusCode -eq 401 -and $AllowTokenRefresh -and -not $refreshedToken) {
+                $refreshedToken = $true
+                $script:SpotifyApiAccessToken = $null
+                $script:SpotifyApiAccessTokenExpiresAt = Get-Date
+                if ($JobId) {
+                    Add-WarningLog -Id $JobId -Message ("Spotify rejected the cached token during the {0} request. Refreshing it once." -f $StageLabel)
+                }
+                continue
+            }
+
+            $shouldRetry = Test-SpotifyApiTransientFailure -StatusCode $statusCode
+            if (-not $shouldRetry -or $attempt -ge $MaxAttempts) {
+                if ($statusCode -eq 429) {
+                    if ($JobId) {
+                        Add-WarningLog -Id $JobId -Message ("Spotify kept rate-limiting the {0} request after {1} attempt(s)." -f $StageLabel, $attempt)
+                    }
+                    throw ("Spotify temporarily rate-limited artist metadata requests during the {0} request." -f $StageLabel)
+                }
+
+                if ($statusCode -ge 500 -and $statusCode -lt 600 -and $JobId) {
+                    Add-WarningLog -Id $JobId -Message ("Spotify's server returned HTTP {0} for the {1} request." -f $statusCode, $StageLabel)
+                }
+
+                throw
+            }
+
+            $retryAfterSeconds = Get-SpotifyApiRetryAfterSeconds -Exception $_.Exception
+            $delaySeconds = Get-SpotifyApiBackoffSeconds -AttemptNumber $attempt -RetryAfterSeconds $retryAfterSeconds
+            if ($JobId) {
+                if ($statusCode -eq 429) {
+                    $retryAfterLabel = if ($retryAfterSeconds) { " Spotify asked us to wait {0} second(s)." -f $retryAfterSeconds } else { "" }
+                    Add-WarningLog -Id $JobId -Message ("Spotify rate-limited the {0} request. Waiting {1} second(s) before retrying (attempt {2} of {3}).{4}" -f $StageLabel, $delaySeconds, ($attempt + 1), $MaxAttempts, $retryAfterLabel)
+                }
+                else {
+                    Add-WarningLog -Id $JobId -Message ("Spotify returned HTTP {0} for the {1} request. Waiting {2} second(s) before retrying (attempt {3} of {4})." -f $statusCode, $StageLabel, $delaySeconds, ($attempt + 1), $MaxAttempts)
+                }
+            }
+            Start-Sleep -Seconds $delaySeconds
+        }
+    }
+}
+
+function Invoke-SpotifyApiJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [string]$JobId,
+        [Parameter(Mandatory = $true)][string]$StageLabel
+    )
+
+    $token = Get-SpotifyApiAccessToken -JobId $JobId
+    return Invoke-SpotifyApiRequestWithRetry -Method "Get" -Uri $Uri -Headers @{
+        Authorization = "Bearer $token"
+    } -JobId $JobId -StageLabel $StageLabel -AllowTokenRefresh
 }
 
 function Get-SpotifyPagedItems {
     param(
-        [Parameter(Mandatory = $true)][string]$Uri
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [string]$JobId,
+        [Parameter(Mandatory = $true)][string]$StageLabel
     )
 
     $items = New-Object System.Collections.Generic.List[object]
     $nextUri = $Uri
+    $pageNumber = 1
 
     while ($nextUri) {
-        $response = Invoke-SpotifyApiJson -Uri $nextUri
+        $response = Invoke-SpotifyApiJson -Uri $nextUri -JobId $JobId -StageLabel ("{0} page {1}" -f $StageLabel, $pageNumber)
         foreach ($item in @($response.items)) {
             $items.Add($item)
         }
         $nextUri = $response.next
+        $pageNumber += 1
+        if ($nextUri) {
+            Start-Sleep -Milliseconds 150
+        }
     }
 
     return $items
+}
+
+function Save-ArtistCatalogCache {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ArtistId,
+        [Parameter(Mandatory = $true)][string]$ArtistName,
+        [Parameter(Mandatory = $true)]$Songs,
+        [string[]]$ReleaseIds = @(),
+        [string[]]$ProcessedReleaseIds = @(),
+        [bool]$IsComplete = $false
+    )
+
+    Write-JsonFile -Data @{
+        artistId = $ArtistId
+        artistName = $ArtistName
+        cachedAt = [DateTime]::UtcNow.ToString("o")
+        isComplete = $IsComplete
+        releaseIds = @($ReleaseIds)
+        processedReleaseIds = @($ProcessedReleaseIds)
+        songs = @($Songs)
+    } -Path $Path
+}
+
+function Read-MetadataSongs {
+    param([Parameter(Mandatory = $true)][string]$MetadataPath)
+
+    if (-not (Test-Path -LiteralPath $MetadataPath)) {
+        return @()
+    }
+
+    try {
+        $parsed = Get-Content $MetadataPath -Raw -Encoding utf8 | ConvertFrom-Json
+        if ($null -eq $parsed) {
+            return @()
+        }
+        if ($parsed -is [System.Array]) {
+            return @($parsed)
+        }
+        return @($parsed)
+    }
+    catch {
+        return @()
+    }
+}
+
+function Read-JsonFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+
+    try {
+        return Get-Content $Path -Raw -Encoding utf8 | ConvertFrom-Json
+    }
+    catch {
+        return $null
+    }
+}
+
+function Write-JsonFile {
+    param(
+        [Parameter(Mandatory = $true)]$Data,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $json = $Data | ConvertTo-Json -Depth 20
+    [System.IO.File]::WriteAllText($Path, $json, $utf8NoBom)
 }
 
 function Write-MetadataSongs {
@@ -435,29 +709,80 @@ function Expand-ArtistToMetadataSongs {
         [Parameter(Mandatory = $true)][string]$JobId
     )
 
-    $artist = Invoke-SpotifyApiJson -Uri ("https://api.spotify.com/v1/artists/{0}" -f $ArtistId)
+    $jobDirectory = Get-JobDirectory -Id $JobId
+    $artistCachePath = Join-Path $jobDirectory "artist-cache.json"
+    $cachedArtistData = Read-JsonFile -Path $artistCachePath
+    if ($cachedArtistData -and $cachedArtistData.artistName -and $cachedArtistData.isComplete -and @($cachedArtistData.songs).Count -gt 0) {
+        Add-Log -Id $JobId -Message ("Using cached artist metadata with {0} track(s)." -f @($cachedArtistData.songs).Count)
+        Update-Job -Id $JobId -Changes @{
+            phase = "Collecting artist tracks"
+            playlistName = [string]$cachedArtistData.artistName
+            playlistId = $ArtistId
+            currentProviderPhase = "Loaded the saved artist catalog from this job's cache."
+        } | Out-Null
+
+        return [pscustomobject]@{
+            ArtistName = [string]$cachedArtistData.artistName
+            Songs = @($cachedArtistData.songs)
+        }
+    }
+
+    $cachedSongs = if ($cachedArtistData) { @($cachedArtistData.songs) } else { @() }
+    $cachedReleaseIds = if ($cachedArtistData) { @($cachedArtistData.releaseIds) } else { @() }
+    $processedReleaseIds = if ($cachedArtistData) { @($cachedArtistData.processedReleaseIds) } else { @() }
+
+    if ($cachedArtistData -and $cachedArtistData.artistName -and ($cachedSongs.Count -gt 0 -or $cachedReleaseIds.Count -gt 0)) {
+        Add-Log -Id $JobId -Message ("Resuming the saved artist catalog cache with {0} track(s) and {1} completed release(s)." -f $cachedSongs.Count, $processedReleaseIds.Count)
+    }
+
+    Add-Log -Id $JobId -Message "Reading artist profile from Spotify."
+    Update-Job -Id $JobId -Changes @{
+        phase = "Reading artist profile"
+        playlistId = $ArtistId
+        currentProviderPhase = "Loading the Spotify artist profile."
+    } | Out-Null
+
+    $artist = Invoke-SpotifyApiJson -Uri ("https://api.spotify.com/v1/artists/{0}" -f $ArtistId) -JobId $JobId -StageLabel "artist profile"
     if (-not $artist -or -not $artist.id) {
-        throw "Could not load this artist's discography from Spotify."
+        throw "Could not load this artist's Spotify profile."
     }
 
     Update-Job -Id $JobId -Changes @{
-        phase = "Reading artist releases from Spotify"
+        phase = "Loading artist releases"
         playlistName = $artist.name
         playlistId = $ArtistId
         currentProviderPhase = "Fetching albums, singles, and compilations from Spotify."
     } | Out-Null
 
-    $albumItems = Get-SpotifyPagedItems -Uri ("https://api.spotify.com/v1/artists/{0}/albums?include_groups=album,single,compilation&limit=50&offset=0&market=US" -f $ArtistId)
+    Add-Log -Id $JobId -Message ("Artist found: {0}" -f $artist.name)
     $albumIds = New-Object System.Collections.Generic.List[string]
-    $seenAlbums = @{}
+    if ($cachedReleaseIds.Count -gt 0) {
+        Add-Log -Id $JobId -Message ("Using the saved release list with {0} release(s)." -f $cachedReleaseIds.Count)
+        foreach ($cachedReleaseId in $cachedReleaseIds) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$cachedReleaseId)) {
+                $albumIds.Add([string]$cachedReleaseId)
+            }
+        }
+    }
+    else {
+        Add-Log -Id $JobId -Message "Loading artist releases from Spotify."
+        $albumItems = Get-SpotifyPagedItems -Uri ("https://api.spotify.com/v1/artists/{0}/albums?include_groups=album,single,compilation&limit=50&offset=0&market=US" -f $ArtistId) -JobId $JobId -StageLabel "artist releases"
+        $seenAlbums = @{}
 
-    foreach ($album in $albumItems) {
-        if ($album.id -and -not $seenAlbums.ContainsKey($album.id)) {
-            $seenAlbums[$album.id] = $true
-            $albumIds.Add([string]$album.id)
+        foreach ($album in $albumItems) {
+            if ($album.id -and -not $seenAlbums.ContainsKey($album.id)) {
+                $seenAlbums[$album.id] = $true
+                $albumIds.Add([string]$album.id)
+            }
         }
     }
 
+    if ($albumIds.Count -eq 0) {
+        throw "Spotify returned no releases for this artist."
+    }
+
+    Save-ArtistCatalogCache -Path $artistCachePath -ArtistId $ArtistId -ArtistName $artist.name -Songs $cachedSongs -ReleaseIds @($albumIds) -ProcessedReleaseIds $processedReleaseIds -IsComplete $false
+    Add-Log -Id $JobId -Message ("Found {0} release(s) to scan." -f $albumIds.Count)
     Update-Job -Id $JobId -Changes @{
         phase = "Collecting tracks from the artist catalog"
         currentProviderPhase = ("Loading tracks from {0} releases." -f $albumIds.Count)
@@ -465,15 +790,31 @@ function Expand-ArtistToMetadataSongs {
 
     $songs = New-Object System.Collections.Generic.List[object]
     $seenSongs = @{}
+    foreach ($cachedSong in $cachedSongs) {
+        if ($cachedSong -and $cachedSong.song_id -and -not $seenSongs.ContainsKey([string]$cachedSong.song_id)) {
+            $seenSongs[[string]$cachedSong.song_id] = $true
+            $songs.Add($cachedSong)
+        }
+    }
+
+    $processedReleaseLookup = @{}
+    foreach ($processedReleaseId in $processedReleaseIds) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$processedReleaseId)) {
+            $processedReleaseLookup[[string]$processedReleaseId] = $true
+        }
+    }
 
     for ($index = 0; $index -lt $albumIds.Count; $index++) {
         $albumId = $albumIds[$index]
+        if ($processedReleaseLookup.ContainsKey($albumId)) {
+            continue
+        }
         try {
             Update-Job -Id $JobId -Changes @{
                 currentProviderPhase = ("Collecting tracks from release {0} of {1}." -f ($index + 1), $albumIds.Count)
             } | Out-Null
 
-            $album = Invoke-SpotifyApiJson -Uri ("https://api.spotify.com/v1/albums/{0}?market=US" -f $albumId)
+            $album = Invoke-SpotifyApiJson -Uri ("https://api.spotify.com/v1/albums/{0}?market=US" -f $albumId) -JobId $JobId -StageLabel ("album details for release {0} of {1}" -f ($index + 1), $albumIds.Count)
             if (-not $album -or -not $album.id) {
                 continue
             }
@@ -484,12 +825,17 @@ function Expand-ArtistToMetadataSongs {
             }
 
             $nextTracksUri = $album.tracks.next
+            $trackPageNumber = 2
             while ($nextTracksUri) {
-                $trackPage = Invoke-SpotifyApiJson -Uri $nextTracksUri
+                $trackPage = Invoke-SpotifyApiJson -Uri $nextTracksUri -JobId $JobId -StageLabel ("album tracks for release {0} of {1}, page {2}" -f ($index + 1), $albumIds.Count, $trackPageNumber)
                 foreach ($track in @($trackPage.items)) {
                     $tracks.Add($track)
                 }
                 $nextTracksUri = $trackPage.next
+                $trackPageNumber += 1
+                if ($nextTracksUri) {
+                    Start-Sleep -Milliseconds 150
+                }
             }
 
             $discCount = 1
@@ -556,9 +902,14 @@ function Expand-ArtistToMetadataSongs {
                     album_type = $album.album_type
                 })
             }
+
+            $processedReleaseLookup[$albumId] = $true
+            $processedReleaseIds = @($processedReleaseLookup.Keys)
+            Save-ArtistCatalogCache -Path $artistCachePath -ArtistId $ArtistId -ArtistName $artist.name -Songs @($songs) -ReleaseIds @($albumIds) -ProcessedReleaseIds $processedReleaseIds -IsComplete $false
+            Start-Sleep -Milliseconds 150
         }
         catch {
-            Add-WarningLog -Id $JobId -Message ("Could not expand one release from the artist catalog. Continuing with the rest.")
+            Add-WarningLog -Id $JobId -Message ("Could not expand one release from the artist catalog. Continuing with the rest. Details: {0}" -f $_.Exception.Message)
         }
     }
 
@@ -568,32 +919,78 @@ function Expand-ArtistToMetadataSongs {
         $songs[$index].list_length = $totalSongs
     }
 
+    if ($songs.Count -eq 0) {
+        throw "Spotify returned releases, but no tracks could be collected for this artist."
+    }
+
+    Add-Log -Id $JobId -Message ("Collected {0} unique track(s) from the artist catalog." -f $songs.Count)
+    Save-ArtistCatalogCache -Path $artistCachePath -ArtistId $ArtistId -ArtistName $artist.name -Songs @($songs) -ReleaseIds @($albumIds) -ProcessedReleaseIds @($albumIds) -IsComplete $true
+
     return [pscustomobject]@{
         ArtistName = $artist.name
         Songs = @($songs)
     }
 }
 
-function Read-MetadataSongs {
-    param([Parameter(Mandatory = $true)][string]$MetadataPath)
+function Get-OperationLabel {
+    param(
+        [Parameter(Mandatory = $true)][string]$Kind,
+        [string]$ItemName = ""
+    )
 
-    if (-not (Test-Path -LiteralPath $MetadataPath)) {
-        return @()
+    switch ($Kind) {
+        "save" {
+            if ($ItemName) {
+                return "Reading Spotify details for $ItemName."
+            }
+            return "Reading Spotify details."
+        }
+        "download-main" {
+            return "Starting the primary download pass."
+        }
+        "download-retry" {
+            if ($ItemName) {
+                return "Retrying $ItemName with fallback audio sources."
+            }
+            return "Retrying one missing song with fallback audio sources."
+        }
+        "resume-check" {
+            return "Checking saved files before retrying only what is still missing."
+        }
+        default {
+            return "Starting downloader work."
+        }
+    }
+}
+
+function Get-LastMeaningfulLogLine {
+    param([Parameter(Mandatory = $true)][string]$JobId)
+
+    $job = Read-Job -Id $JobId
+    if (-not (Test-Path -LiteralPath $job.logPath)) {
+        return $null
     }
 
-    try {
-        $parsed = Get-Content $MetadataPath -Raw -Encoding utf8 | ConvertFrom-Json
-        if ($null -eq $parsed) {
-            return @()
+    $lines = Get-Content $job.logPath -Encoding utf8
+    for ($index = $lines.Count - 1; $index -ge 0; $index--) {
+        $line = [string]$lines[$index]
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
         }
-        if ($parsed -is [System.Array]) {
-            return @($parsed)
+
+        $bare = $line -replace '^\[[^\]]+\]\s*', ''
+        if (Test-SpotdlLoggingNoiseLine -Line $bare) {
+            continue
         }
-        return @($parsed)
+
+        if ($bare -match '^(Processing query:|https?://|[A-Za-z]:\\)' -or $bare -match '^ylist\.spotdl$') {
+            continue
+        }
+
+        return $bare
     }
-    catch {
-        return @()
-    }
+
+    return $null
 }
 
 function Get-DownloadedFileCount {
@@ -611,11 +1008,13 @@ function Update-CurrentSongProgress {
         [Parameter(Mandatory = $true)][string]$Id,
         [Parameter(Mandatory = $true)]$SongQueue,
         [int]$CompletedCount = 0,
+        [int]$CompletedOffset = 0,
         [string]$ProviderPhase = $null,
         [string]$Phase = $null
     )
 
     $safeCompletedCount = [Math]::Max(0, [Math]::Min($CompletedCount, $SongQueue.Count))
+    $resolvedCompletedCount = [Math]::Max(0, $CompletedOffset + $safeCompletedCount)
     $currentSong = $null
     if ($safeCompletedCount -lt $SongQueue.Count) {
         $currentSong = $SongQueue[$safeCompletedCount]
@@ -624,7 +1023,7 @@ function Update-CurrentSongProgress {
     Update-JobSafe -Id $Id -Mutator {
         param($job)
         Ensure-JobShape -Job $job
-        $job.matchCount = $safeCompletedCount
+        $job.matchCount = $resolvedCompletedCount
         $job.currentSong = $currentSong
         if ($PSBoundParameters.ContainsKey("ProviderPhase")) {
             $job.currentProviderPhase = $ProviderPhase
@@ -640,6 +1039,7 @@ function Update-ProgressSnapshot {
         [Parameter(Mandatory = $true)][string]$Id,
         [Parameter(Mandatory = $true)][string]$FolderPath,
         [int]$UniqueSongCount = 0,
+        [int]$MissingCount = -1,
         [string]$Phase = $null
     )
 
@@ -652,7 +1052,10 @@ function Update-ProgressSnapshot {
         param($job)
         Ensure-JobShape -Job $job
         $job.downloadedCount = $downloadedCount
-        if ($UniqueSongCount -gt 0) {
+        if ($MissingCount -ge 0) {
+            $job.missingCount = $MissingCount
+        }
+        elseif ($UniqueSongCount -gt 0) {
             $job.missingCount = [Math]::Max($UniqueSongCount - $downloadedCount, 0)
         }
         if ($Phase) {
@@ -666,15 +1069,17 @@ function Invoke-SpotdlWithProgress {
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][string]$JobId,
+        [Parameter(Mandatory = $true)][string]$OperationLabel,
         [string]$ProgressFolder,
         [string[]]$SongQueue = @(),
         [int]$UniqueSongCount = 0,
+        [int]$CompletedOffset = 0,
         [string]$MatchingPhase = "Matching songs to sources",
         [string]$DownloadingPhase = "Downloading files"
     )
 
     $spotdlArgs = if (Test-Path -LiteralPath $script:SpotdlConfigPath) { @("--config") + $Arguments } else { $Arguments }
-    Add-Log -Id $JobId -Message ("Running: spotdl.exe " + ($spotdlArgs -join " "))
+    Add-Log -Id $JobId -Message $OperationLabel
     $completedCount = 0
     $downloadStarted = $false
     Push-Location -LiteralPath $WorkingDirectory
@@ -696,31 +1101,31 @@ function Invoke-SpotdlWithProgress {
 
             if ($ProgressFolder -and $SongQueue.Count -gt 0) {
                 if ($line -match '^Found \d+ songs in ') {
-                    Update-CurrentSongProgress -Id $JobId -SongQueue $SongQueue -CompletedCount $completedCount -ProviderPhase "Preparing the saved playlist for matching." -Phase "Preparing download queue"
+                    Update-CurrentSongProgress -Id $JobId -SongQueue $SongQueue -CompletedCount $completedCount -CompletedOffset $CompletedOffset -ProviderPhase "Preparing the saved playlist for matching." -Phase "Preparing download queue"
                     return
                 }
 
                 $shouldAdvance = $line -match 'Downloaded "' -or $line -match '^Skipping ' -or $line -match '^AudioProviderError:' -or $line -match '^LookupError:'
                 if (-not $downloadStarted -and ($shouldAdvance -or $line -match '^Downloading ' -or $line -match '^Converting ')) {
                     $downloadStarted = $true
-                    Update-CurrentSongProgress -Id $JobId -SongQueue $SongQueue -CompletedCount $completedCount -ProviderPhase "Downloading matched audio sources." -Phase $DownloadingPhase
+                    Update-CurrentSongProgress -Id $JobId -SongQueue $SongQueue -CompletedCount $completedCount -CompletedOffset $CompletedOffset -ProviderPhase "Downloading matched audio sources." -Phase $DownloadingPhase
                     Update-ProgressSnapshot -Id $JobId -FolderPath $ProgressFolder -UniqueSongCount $UniqueSongCount -Phase $DownloadingPhase
                 }
 
                 if ($line -match '^Retrying') {
-                    Update-CurrentSongProgress -Id $JobId -SongQueue $SongQueue -CompletedCount $completedCount -ProviderPhase "Trying the next source after a provider miss." -Phase $MatchingPhase
+                    Update-CurrentSongProgress -Id $JobId -SongQueue $SongQueue -CompletedCount $completedCount -CompletedOffset $CompletedOffset -ProviderPhase "Trying the next source after a provider miss." -Phase $MatchingPhase
                 }
                 elseif ($line -match '^AudioProviderError:' -or $line -match '^LookupError:') {
-                    Update-CurrentSongProgress -Id $JobId -SongQueue $SongQueue -CompletedCount $completedCount -ProviderPhase "The current provider missed. Moving to the next source." -Phase $MatchingPhase
+                    Update-CurrentSongProgress -Id $JobId -SongQueue $SongQueue -CompletedCount $completedCount -CompletedOffset $CompletedOffset -ProviderPhase "The current provider missed. Moving to the next source." -Phase $MatchingPhase
                 }
                 elseif (-not $downloadStarted) {
-                    Update-CurrentSongProgress -Id $JobId -SongQueue $SongQueue -CompletedCount $completedCount -ProviderPhase "Checking YouTube Music and YouTube for the next track." -Phase $MatchingPhase
+                    Update-CurrentSongProgress -Id $JobId -SongQueue $SongQueue -CompletedCount $completedCount -CompletedOffset $CompletedOffset -ProviderPhase "Checking YouTube Music and YouTube for the next track." -Phase $MatchingPhase
                 }
 
                 if ($shouldAdvance) {
                     $completedCount = [Math]::Min($completedCount + 1, $SongQueue.Count)
                     $nextProviderPhase = if ($downloadStarted) { "Downloading matched audio sources." } else { "Checking YouTube Music and YouTube for the next track." }
-                    Update-CurrentSongProgress -Id $JobId -SongQueue $SongQueue -CompletedCount $completedCount -ProviderPhase $nextProviderPhase -Phase $(if ($downloadStarted) { $DownloadingPhase } else { $MatchingPhase })
+                    Update-CurrentSongProgress -Id $JobId -SongQueue $SongQueue -CompletedCount $completedCount -CompletedOffset $CompletedOffset -ProviderPhase $nextProviderPhase -Phase $(if ($downloadStarted) { $DownloadingPhase } else { $MatchingPhase })
                     Update-ProgressSnapshot -Id $JobId -FolderPath $ProgressFolder -UniqueSongCount $UniqueSongCount -Phase $(if ($downloadStarted) { $DownloadingPhase } else { $MatchingPhase })
                 }
             }
@@ -736,11 +1141,12 @@ function Invoke-Spotdl {
     param(
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
-        [Parameter(Mandatory = $true)][string]$JobId
+        [Parameter(Mandatory = $true)][string]$JobId,
+        [Parameter(Mandatory = $true)][string]$OperationLabel
     )
 
     $spotdlArgs = if (Test-Path -LiteralPath $script:SpotdlConfigPath) { @("--config") + $Arguments } else { $Arguments }
-    Add-Log -Id $JobId -Message ("Running: spotdl.exe " + ($spotdlArgs -join " "))
+    Add-Log -Id $JobId -Message $OperationLabel
     Push-Location -LiteralPath $WorkingDirectory
     try {
         & $script:SpotdlExe @spotdlArgs 2>&1 | ForEach-Object {
@@ -765,11 +1171,12 @@ function Invoke-SpotdlSaveWithRetry {
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][string]$JobId,
+        [Parameter(Mandatory = $true)][string]$OperationLabel,
         [int]$MaxAttempts = 2
     )
 
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-        $exitCode = Invoke-Spotdl -Arguments $Arguments -WorkingDirectory $WorkingDirectory -JobId $JobId
+        $exitCode = Invoke-Spotdl -Arguments $Arguments -WorkingDirectory $WorkingDirectory -JobId $JobId -OperationLabel $OperationLabel
         if ($exitCode -eq 0) {
             return $exitCode
         }
@@ -808,30 +1215,25 @@ try {
     $songQueue = @()
     $songs = @()
 
-    if ($urlType -eq "artist") {
-        if ($job.resumeOnlyMissing -and (Test-Path -LiteralPath $job.metadataPath)) {
-            $songs = Read-MetadataSongs -MetadataPath $job.metadataPath
-        }
+    if ($job.resumeOnlyMissing -and (Test-Path -LiteralPath $job.metadataPath)) {
+        Add-Log -Id $JobId -Message (Get-OperationLabel -Kind "resume-check")
+        $songs = Read-MetadataSongs -MetadataPath $job.metadataPath
+    }
 
-        if ($songs.Count -eq 0) {
-            try {
-                $artistCatalog = Expand-ArtistToMetadataSongs -ArtistId $playlistId -ArtistUrl $job.url -JobId $JobId
-                $songs = @($artistCatalog.Songs)
-                if ($artistCatalog.ArtistName) {
-                    $playlistName = [string]$artistCatalog.ArtistName
-                }
-                if ($songs.Count -gt 0) {
-                    Write-MetadataSongs -Songs $songs -MetadataPath $job.metadataPath
-                }
-            }
-            catch {
-                throw "Could not load this artist's discography from Spotify."
-            }
+    if ($songs.Count -eq 0 -and $urlType -eq "artist") {
+        $artistCatalog = Expand-ArtistToMetadataSongs -ArtistId $playlistId -ArtistUrl $job.url -JobId $JobId
+        $songs = @($artistCatalog.Songs)
+        if ($artistCatalog.ArtistName) {
+            $playlistName = [string]$artistCatalog.ArtistName
+        }
+        if ($songs.Count -gt 0) {
+            Write-MetadataSongs -Songs $songs -MetadataPath $job.metadataPath
+            Add-Log -Id $JobId -Message ("Saved {0} artist track(s) to the local metadata file." -f $songs.Count)
         }
     }
-    else {
+    elseif ($songs.Count -eq 0) {
         $saveArgs = @("save", $job.url, "--save-file", $job.metadataPath)
-        $saveExit = Invoke-SpotdlSaveWithRetry -Arguments $saveArgs -WorkingDirectory $script:Root -JobId $JobId
+        $saveExit = Invoke-SpotdlSaveWithRetry -Arguments $saveArgs -WorkingDirectory $script:Root -JobId $JobId -OperationLabel (Get-OperationLabel -Kind "save" -ItemName $urlType)
         $songs = Read-MetadataSongs -MetadataPath $job.metadataPath
 
         if ($saveExit -ne 0 -and $songs.Count -gt 0) {
@@ -844,7 +1246,7 @@ try {
     }
 
     if ($songs.Count -eq 0) {
-        throw "Could not load this artist's discography from Spotify."
+        throw "No Spotify tracks were collected for this link."
     }
 
     $uniqueSongs = Get-UniqueSongs -Songs $songs
@@ -879,8 +1281,8 @@ try {
         downloadedCount = $existingDownloadedCount
         matchCount = if ($job.resumeOnlyMissing -and $uniqueSongs.Count -gt 0) { [Math]::Max($uniqueSongs.Count - $resumePendingSongs.Count, 0) } else { 0 }
         currentSong = if ($songQueue.Count -gt 0) { $songQueue[0] } else { $null }
-        currentProviderPhase = if ($job.resumeOnlyMissing) { "Retrying only the songs still missing from the last attempt." } elseif ($urlType -eq "artist") { "Preparing the artist catalog for matching." } else { "Preparing the saved playlist for matching." }
-        missingSongs = if ($job.resumeOnlyMissing) { $resumePendingSongs } else { @() }
+        currentProviderPhase = if ($job.resumeOnlyMissing) { "Retrying only the songs still missing from the last attempt." } else { "Preparing the saved playlist for matching." }
+        missingSongs = if ($job.resumeOnlyMissing) { @($resumePendingSongs) } else { @() }
         missingCount = if ($job.resumeOnlyMissing) { $resumePendingSongs.Count } elseif ($uniqueSongs.Count -gt 0) { [Math]::Max($uniqueSongs.Count - $existingDownloadedCount, 0) } else { $null }
         missingSongsKnown = [bool]$job.resumeOnlyMissing
     }
@@ -898,15 +1300,19 @@ try {
                 missingCount = 0
                 missingSongsKnown = $true
                 error = $null
+                matchCount = $uniqueSongs.Count
             } | Out-Null
 
             Add-Log -Id $JobId -Message "Nothing left to retry. All files are already present."
         }
         else {
-            foreach ($song in $resumePendingSongs) {
-                Add-Log -Id $JobId -Message ("Retrying missing song: {0} - {1}" -f $song.artist, $song.title)
+            $retryBaseCompletedCount = [Math]::Max($uniqueSongs.Count - $resumePendingSongs.Count, 0)
+            for ($retryIndex = 0; $retryIndex -lt $resumePendingSongs.Count; $retryIndex++) {
+                $song = $resumePendingSongs[$retryIndex]
+                $songLabel = "{0} - {1}" -f $song.artist, $song.title
+                Add-Log -Id $JobId -Message ("Retrying missing song: {0}" -f $songLabel)
                 Update-Job -Id $JobId -Changes @{
-                    currentSong = "{0} - {1}" -f $song.artist, $song.title
+                    currentSong = $songLabel
                     currentProviderPhase = "Trying YouTube Music, YouTube, and SoundCloud for a missing track."
                 } | Out-Null
                 $retryArgs = @(
@@ -919,16 +1325,25 @@ try {
                     "--output", "{artists} - {title}.{output-ext}",
                     "--print-errors"
                 )
-                [void](Invoke-SpotdlWithProgress -Arguments $retryArgs -WorkingDirectory $outputFolder -JobId $JobId -ProgressFolder $outputFolder -SongQueue @("{0} - {1}" -f $song.artist, $song.title) -UniqueSongCount $uniqueSongs.Count -MatchingPhase "Retrying missing songs" -DownloadingPhase "Retrying missing songs")
+                [void](Invoke-SpotdlWithProgress -Arguments $retryArgs -WorkingDirectory $outputFolder -JobId $JobId -OperationLabel (Get-OperationLabel -Kind "download-retry" -ItemName $songLabel) -ProgressFolder $outputFolder -SongQueue @($songLabel) -UniqueSongCount $uniqueSongs.Count -CompletedOffset ($retryBaseCompletedCount + $retryIndex) -MatchingPhase "Retrying missing songs" -DownloadingPhase "Retrying missing songs")
+
+                $liveMissingSongs = @(Get-MissingSongs -Songs $uniqueSongs -FolderPath $outputFolder)
+                Update-Job -Id $JobId -Changes @{
+                    missingSongs = $liveMissingSongs
+                    missingCount = $liveMissingSongs.Count
+                    downloadedCount = Get-DownloadedFileCount -FolderPath $outputFolder
+                    matchCount = [Math]::Max($uniqueSongs.Count - $liveMissingSongs.Count, 0)
+                    currentSong = if ($retryIndex + 1 -lt $resumePendingSongs.Count) { "{0} - {1}" -f $resumePendingSongs[$retryIndex + 1].artist, $resumePendingSongs[$retryIndex + 1].title } else { $null }
+                } | Out-Null
             }
 
-            $finalMissingSongs = Get-MissingSongs -Songs $uniqueSongs -FolderPath $outputFolder
+            $finalMissingSongs = @(Get-MissingSongs -Songs $uniqueSongs -FolderPath $outputFolder)
             $finalDownloadedCount = Get-DownloadedFileCount -FolderPath $outputFolder
 
             Update-Job -Id $JobId -Changes @{
                 status = "completed"
                 phase = "Finished"
-                missingSongs = $finalMissingSongs
+                missingSongs = @($finalMissingSongs)
                 missingCount = $finalMissingSongs.Count
                 downloadedCount = $finalDownloadedCount
                 workerPid = $null
@@ -953,24 +1368,27 @@ try {
             "--print-errors"
         )
         Update-CurrentSongProgress -Id $JobId -SongQueue $songQueue -CompletedCount 0 -ProviderPhase "Checking YouTube Music and YouTube for the next track." -Phase "Matching songs to sources"
-        [void](Invoke-SpotdlWithProgress -Arguments $mainArgs -WorkingDirectory $outputFolder -JobId $JobId -ProgressFolder $outputFolder -SongQueue $songQueue -UniqueSongCount $uniqueSongs.Count -MatchingPhase "Matching songs to sources" -DownloadingPhase "Downloading files")
+        [void](Invoke-SpotdlWithProgress -Arguments $mainArgs -WorkingDirectory $outputFolder -JobId $JobId -OperationLabel (Get-OperationLabel -Kind "download-main") -ProgressFolder $outputFolder -SongQueue $songQueue -UniqueSongCount $uniqueSongs.Count -MatchingPhase "Matching songs to sources" -DownloadingPhase "Downloading files")
 
-        $missingSongs = Get-MissingSongs -Songs $uniqueSongs -FolderPath $outputFolder
+        $missingSongs = @(Get-MissingSongs -Songs $uniqueSongs -FolderPath $outputFolder)
         $job = Update-Job -Id $JobId -Changes @{
             phase = "Retrying missing songs"
-            missingSongs = $missingSongs
+            missingSongs = @($missingSongs)
             missingCount = $missingSongs.Count
             downloadedCount = Get-DownloadedFileCount -FolderPath $outputFolder
-            matchCount = $job.uniqueTrackCount - $missingSongs.Count
+            matchCount = [Math]::Max($job.uniqueTrackCount - $missingSongs.Count, 0)
             currentSong = if ($missingSongs.Count -gt 0) { "{0} - {1}" -f $missingSongs[0].artist, $missingSongs[0].title } else { $null }
             currentProviderPhase = if ($missingSongs.Count -gt 0) { "Retrying missing songs with fallback sources." } else { "Checking whether any files still need a retry." }
             missingSongsKnown = $true
         }
 
-        foreach ($song in $missingSongs) {
-            Add-Log -Id $JobId -Message ("Retrying missing song: {0} - {1}" -f $song.artist, $song.title)
+        $retryBaseCompletedCount = [Math]::Max($uniqueSongs.Count - $missingSongs.Count, 0)
+        for ($retryIndex = 0; $retryIndex -lt $missingSongs.Count; $retryIndex++) {
+            $song = $missingSongs[$retryIndex]
+            $songLabel = "{0} - {1}" -f $song.artist, $song.title
+            Add-Log -Id $JobId -Message ("Retrying missing song: {0}" -f $songLabel)
             Update-Job -Id $JobId -Changes @{
-                currentSong = "{0} - {1}" -f $song.artist, $song.title
+                currentSong = $songLabel
                 currentProviderPhase = "Trying YouTube Music, YouTube, and SoundCloud for a missing track."
             } | Out-Null
             $retryArgs = @(
@@ -983,16 +1401,25 @@ try {
                 "--output", "{artists} - {title}.{output-ext}",
                 "--print-errors"
             )
-            [void](Invoke-SpotdlWithProgress -Arguments $retryArgs -WorkingDirectory $outputFolder -JobId $JobId -ProgressFolder $outputFolder -SongQueue @("{0} - {1}" -f $song.artist, $song.title) -UniqueSongCount $uniqueSongs.Count -MatchingPhase "Retrying missing songs" -DownloadingPhase "Retrying missing songs")
+            [void](Invoke-SpotdlWithProgress -Arguments $retryArgs -WorkingDirectory $outputFolder -JobId $JobId -OperationLabel (Get-OperationLabel -Kind "download-retry" -ItemName $songLabel) -ProgressFolder $outputFolder -SongQueue @($songLabel) -UniqueSongCount $uniqueSongs.Count -CompletedOffset ($retryBaseCompletedCount + $retryIndex) -MatchingPhase "Retrying missing songs" -DownloadingPhase "Retrying missing songs")
+
+            $liveMissingSongs = @(Get-MissingSongs -Songs $uniqueSongs -FolderPath $outputFolder)
+            Update-Job -Id $JobId -Changes @{
+                missingSongs = $liveMissingSongs
+                missingCount = $liveMissingSongs.Count
+                downloadedCount = Get-DownloadedFileCount -FolderPath $outputFolder
+                matchCount = [Math]::Max($uniqueSongs.Count - $liveMissingSongs.Count, 0)
+                currentSong = if ($retryIndex + 1 -lt $missingSongs.Count) { "{0} - {1}" -f $missingSongs[$retryIndex + 1].artist, $missingSongs[$retryIndex + 1].title } else { $null }
+            } | Out-Null
         }
 
-        $finalMissingSongs = Get-MissingSongs -Songs $uniqueSongs -FolderPath $outputFolder
+        $finalMissingSongs = @(Get-MissingSongs -Songs $uniqueSongs -FolderPath $outputFolder)
         $finalDownloadedCount = Get-DownloadedFileCount -FolderPath $outputFolder
 
         Update-Job -Id $JobId -Changes @{
             status = "completed"
             phase = "Finished"
-            missingSongs = $finalMissingSongs
+            missingSongs = @($finalMissingSongs)
             missingCount = $finalMissingSongs.Count
             downloadedCount = $finalDownloadedCount
             workerPid = $null
@@ -1007,12 +1434,35 @@ try {
     }
 }
 catch {
-    $message = Get-FriendlyWorkerError -JobId $JobId -FallbackMessage $_.Exception.Message -UrlType (Get-SpotifyUrlType -Url ((Read-Job -Id $JobId).url))
+    $job = Read-Job -Id $JobId
+    $lastMeaningfulLogLine = Get-LastMeaningfulLogLine -JobId $JobId
+    $fallbackMessage = if ($_.Exception.Message -eq "--- Logging error ---" -and $lastMeaningfulLogLine) {
+        "The downloader stopped after: $lastMeaningfulLogLine"
+    }
+    elseif ($_.Exception.Message) {
+        $_.Exception.Message
+    }
+    elseif ($lastMeaningfulLogLine) {
+        "The downloader stopped after: $lastMeaningfulLogLine"
+    }
+    else {
+        "The downloader stopped unexpectedly."
+    }
+
+    $message = Get-FriendlyWorkerError -JobId $JobId -FallbackMessage $fallbackMessage -UrlType (Get-SpotifyUrlType -Url $job.url)
+    if ($job.outputFolder) {
+        $savedFiles = Get-DownloadedFileCount -FolderPath $job.outputFolder
+        $remainingFiles = if ($job.uniqueTrackCount -gt 0) { [Math]::Max($job.uniqueTrackCount - $savedFiles, 0) } else { $null }
+        if ($null -ne $remainingFiles) {
+            Add-Log -Id $JobId -Message ("Current summary: {0} file(s) saved, {1} still missing." -f $savedFiles, $remainingFiles)
+        }
+    }
     Add-Log -Id $JobId -Message ("Worker failed: " + $message)
     Update-Job -Id $JobId -Changes @{
         status = "failed"
         phase = "Failed"
         workerPid = $null
+        currentSong = $null
         currentProviderPhase = $null
         error = $message
     } | Out-Null

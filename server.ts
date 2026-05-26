@@ -63,7 +63,16 @@ async function writeJob(job: JobRecord) {
 }
 
 function normalizeJob(job: Partial<JobRecord>): JobRecord {
-  const normalizedMissingSongs = Array.isArray(job.missingSongs) ? job.missingSongs : [];
+  const normalizedMissingSongs = Array.isArray(job.missingSongs)
+    ? job.missingSongs
+    : job.missingSongs
+      ? [job.missingSongs as JobRecord["missingSongs"][number]]
+      : [];
+  const normalizedMissingCount = typeof job.missingCount === "number"
+    ? job.missingCount
+    : (job.status === "completed" || job.status === "failed" || job.status === "canceled")
+      ? normalizedMissingSongs.length
+      : null;
   return {
     id: job.id ?? "",
     url: job.url ?? "",
@@ -78,7 +87,7 @@ function normalizeJob(job: Partial<JobRecord>): JobRecord {
     trackCount: job.trackCount ?? null,
     uniqueTrackCount: job.uniqueTrackCount ?? null,
     downloadedCount: job.downloadedCount ?? 0,
-    missingCount: job.missingCount ?? null,
+    missingCount: normalizedMissingCount,
     missingSongs: normalizedMissingSongs,
     logPath: job.logPath ?? "",
     metadataPath: job.metadataPath ?? "",
