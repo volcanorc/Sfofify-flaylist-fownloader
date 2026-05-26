@@ -1,4 +1,5 @@
 const requestedPort = Number(Deno.args[0] ?? "8976");
+const strictPort = Deno.env.get("SPOTDL_STRICT_PORT") === "1";
 const root = Deno.cwd();
 const webRoot = `${root}\\web`;
 const dataRoot = `${root}\\app-data`;
@@ -13,7 +14,7 @@ for (const path of [webRoot, dataRoot, historyRoot, downloadsRoot]) {
 type JobRecord = {
   id: string;
   url: string;
-  urlType: "playlist" | "track" | "artist" | "unknown";
+  urlType: "playlist" | "track" | "artist" | "album" | "unknown";
   status: string;
   phase: string;
   createdAt: string;
@@ -33,6 +34,11 @@ type JobRecord = {
   currentSong: string | null;
   currentProviderPhase: string | null;
   retryOf: string | null;
+  resumeFromJobId: string | null;
+  resumeOnlyMissing: boolean;
+  resumeOutputFolder: string | null;
+  missingSongsKnown: boolean;
+  replacedByJobId: string | null;
   error: string | null;
 };
 
@@ -57,6 +63,7 @@ async function writeJob(job: JobRecord) {
 }
 
 function normalizeJob(job: Partial<JobRecord>): JobRecord {
+  const normalizedMissingSongs = Array.isArray(job.missingSongs) ? job.missingSongs : [];
   return {
     id: job.id ?? "",
     url: job.url ?? "",
@@ -72,7 +79,7 @@ function normalizeJob(job: Partial<JobRecord>): JobRecord {
     uniqueTrackCount: job.uniqueTrackCount ?? null,
     downloadedCount: job.downloadedCount ?? 0,
     missingCount: job.missingCount ?? null,
-    missingSongs: job.missingSongs ?? [],
+    missingSongs: normalizedMissingSongs,
     logPath: job.logPath ?? "",
     metadataPath: job.metadataPath ?? "",
     workerPid: job.workerPid ?? null,
@@ -80,14 +87,19 @@ function normalizeJob(job: Partial<JobRecord>): JobRecord {
     currentSong: job.currentSong ?? null,
     currentProviderPhase: job.currentProviderPhase ?? null,
     retryOf: job.retryOf ?? null,
+    resumeFromJobId: job.resumeFromJobId ?? null,
+    resumeOnlyMissing: job.resumeOnlyMissing ?? false,
+    resumeOutputFolder: job.resumeOutputFolder ?? null,
+    missingSongsKnown: job.missingSongsKnown ?? (job.status === "completed" || job.status === "failed" || job.status === "canceled"),
+    replacedByJobId: job.replacedByJobId ?? null,
     error: job.error ?? null,
   };
 }
 
 function detectSpotifyUrlType(url: string): JobRecord["urlType"] {
-  const match = url.match(/open\.spotify\.com\/(playlist|track|artist)\//i);
+  const match = url.match(/open\.spotify\.com\/(playlist|track|artist|album)\//i);
   const kind = match?.[1]?.toLowerCase();
-  if (kind === "playlist" || kind === "track" || kind === "artist") {
+  if (kind === "playlist" || kind === "track" || kind === "artist" || kind === "album") {
     return kind;
   }
   return "unknown";
@@ -207,23 +219,32 @@ async function removeJobArtifacts(jobId: string) {
     : new Error("Saved history could not be removed from disk.");
 }
 
-async function createJob(url: string, retryOf: string | null = null): Promise<JobRecord> {
+async function createJob(
+  url: string,
+  options: {
+    retryOf?: string | null;
+    resumeOnlyMissing?: boolean;
+  } = {},
+): Promise<JobRecord> {
   const id = crypto.randomUUID().replaceAll("-", "");
   const jobFolder = getJobDir(id);
   await Deno.mkdir(jobFolder, { recursive: true });
+  const retryOf = options.retryOf?.trim() || null;
+  const sourceJob = retryOf ? await readJob(retryOf) : null;
+  const resumeOnlyMissing = Boolean(options.resumeOnlyMissing);
   const job: JobRecord = {
     id,
     url,
-    urlType: detectSpotifyUrlType(url),
+    urlType: sourceJob?.urlType ?? detectSpotifyUrlType(url),
     status: "queued",
     phase: "Queued",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    playlistName: null,
-    playlistId: null,
+    playlistName: sourceJob?.playlistName ?? null,
+    playlistId: sourceJob?.playlistId ?? null,
     outputFolder: null,
-    trackCount: null,
-    uniqueTrackCount: null,
+    trackCount: sourceJob?.trackCount ?? null,
+    uniqueTrackCount: sourceJob?.uniqueTrackCount ?? null,
     downloadedCount: 0,
     missingCount: null,
     missingSongs: [],
@@ -234,8 +255,27 @@ async function createJob(url: string, retryOf: string | null = null): Promise<Jo
     currentSong: null,
     currentProviderPhase: null,
     retryOf,
+    resumeFromJobId: sourceJob?.id ?? null,
+    resumeOnlyMissing,
+    resumeOutputFolder: resumeOnlyMissing ? sourceJob?.outputFolder ?? null : null,
+    missingSongsKnown: false,
+    replacedByJobId: null,
     error: null,
   };
+
+  if (sourceJob && resumeOnlyMissing) {
+    try {
+      await Deno.copyFile(sourceJob.metadataPath, job.metadataPath);
+    } catch {
+    }
+
+    sourceJob.replacedByJobId = id;
+    await writeJob(sourceJob);
+  } else if (sourceJob && sourceJob.urlType === "artist") {
+    sourceJob.replacedByJobId = id;
+    await writeJob(sourceJob);
+  }
+
   await writeJob(job);
   return job;
 }
@@ -293,7 +333,9 @@ await migrateLegacyJobs();
 let serverPort = requestedPort;
 let started = false;
 
-for (let offset = 0; offset < 15; offset++) {
+const maxPortAttempts = strictPort ? 1 : 15;
+
+for (let offset = 0; offset < maxPortAttempts; offset++) {
   const tryPort = requestedPort + offset;
   try {
     Deno.serve({ hostname: "127.0.0.1", port: tryPort }, async (request) => {
@@ -316,12 +358,15 @@ for (let offset = 0; offset < 15; offset++) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/downloads") {
-    const body = await request.json().catch(() => null) as { url?: string; retryOf?: string } | null;
+    const body = await request.json().catch(() => null) as { url?: string; retryOf?: string; resumeOnlyMissing?: boolean } | null;
     if (!body?.url?.trim()) {
       return json({ error: "Missing playlist URL." }, 400);
     }
 
-    const job = await createJob(body.url.trim(), body.retryOf?.trim() || null);
+    const job = await createJob(body.url.trim(), {
+      retryOf: body.retryOf?.trim() || null,
+      resumeOnlyMissing: body.resumeOnlyMissing === true,
+    });
     await spawnWorker(job.id);
     return json(job, 202);
   }
@@ -422,6 +467,9 @@ for (let offset = 0; offset < 15; offset++) {
 }
 
 if (!started) {
+  if (strictPort) {
+    throw new Error(`Could not start the local web UI on port ${requestedPort}.`);
+  }
   throw new Error(`Could not find an open port between ${requestedPort} and ${requestedPort + 14}.`);
 }
 

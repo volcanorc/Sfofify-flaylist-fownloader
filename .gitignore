@@ -4,7 +4,7 @@
 .tools/
 app-data/
 downloads/
+Microsoft/
 *.spotdl
 *.log
 *.tmp
-

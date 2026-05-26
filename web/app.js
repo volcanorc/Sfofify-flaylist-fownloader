@@ -85,6 +85,8 @@ function showToast(message, type = "success") {
     retry: { title: "Retry started", duration: 2000 },
     canceled: { title: "Canceled", duration: 2000 },
     deleted: { title: "Deleted", duration: 2000 },
+    copied: { title: "Copied", duration: 1800 },
+    error: { title: "Copy failed", duration: 2200 },
     notice: { title: "Notice", duration: 2000 },
   };
   const meta = metaByType[type] || metaByType.notice;
@@ -122,6 +124,13 @@ function escapeHtml(value) {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+}
+
+async function copyText(text) {
+  if (!navigator.clipboard?.writeText) {
+    throw new Error("Clipboard copy is not available in this browser.");
+  }
+  await navigator.clipboard.writeText(text);
 }
 
 function formatJobTitle(job) {
@@ -242,6 +251,12 @@ function getProgressModel(job, rawLog) {
   } else if (job.status === "canceled") {
     activeKey = "retrying";
     note = "This playlist was canceled from the app.";
+  } else if (job.phase === "Reading artist releases from Spotify") {
+    activeKey = "metadata";
+    note = "We are reading the artist's albums, singles, and compilations from Spotify.";
+  } else if (job.phase === "Collecting tracks from the artist catalog") {
+    activeKey = "metadata";
+    note = job.currentProviderPhase || "Collecting tracks from the artist catalog.";
   } else if (job.phase === "Saving playlist metadata") {
     activeKey = "metadata";
     note = "We are checking the playlist link and collecting song details from Spotify.";
@@ -320,7 +335,20 @@ function getLogLines(logText) {
   return (logText || "")
     .split(/\r?\n/)
     .map(line => line.trimEnd())
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter(line => !isNoiseLogLine(line));
+}
+
+function isNoiseLogLine(line) {
+  const bare = line.replace(/^\[[^\]]+\]\s*/, "");
+  return (
+    /--- Logging error ---/.test(bare) ||
+    /^Traceback \(most recent call last\):$/.test(bare) ||
+    /^Call stack:$/.test(bare) ||
+    /^Logged from file /.test(bare) ||
+    /^Message:$/.test(bare) ||
+    /^Arguments:$/.test(bare)
+  );
 }
 
 function getLogLineVariant(line) {
@@ -393,9 +421,7 @@ function humanizeLine(line) {
   if (bare.startsWith("Save step failed. Retrying metadata fetch")) return formatted.replace(bare, "Retrying the Spotify metadata lookup.");
   if (bare.includes("You might be blocked by YouTube Music")) return formatted.replace(bare, "The audio provider may be rate-limiting requests. Fallbacks can still recover songs.");
   if (bare.startsWith("Canceled by user.")) return formatted.replace(bare, "Canceled from the app.");
-  if (bare.startsWith("Worker failed: --- Logging error ---")) return formatted.replace(bare, "The provider emitted a logging error. The downloader will try safer fallbacks where possible.");
   if (bare.startsWith("Worker failed:")) return formatted.replace(bare, bare.replace("Worker failed:", "The downloader stopped:"));
-  if (bare.startsWith("--- Logging error ---")) return formatted.replace(bare, "The provider emitted a logging error. Fallbacks may still continue.");
   if (/^AudioProviderError:\s*YT-DLP download error/i.test(bare)) return formatted.replace(bare, "A source download failed. Trying safer fallback sources.");
   if (bare.startsWith("Finished. Downloaded files:")) {
     return formatted.replace(
@@ -596,6 +622,7 @@ async function upsertJob(job) {
   card.dataset.collapsed = collapsed ? "true" : "false";
   titleEl.textContent = formatJobTitle(job);
   urlEl.textContent = job.url;
+  urlEl.title = "Click to copy playlist URL";
   badgeEl.textContent = job.status;
   const compactSummary = getCompactSummary(job);
   compactSummaryEl.innerHTML = `
@@ -639,6 +666,15 @@ async function upsertJob(job) {
   };
   toggleCollapseButtonEl.onclick = toggleCollapsed;
   compactToggleButtonEl.onclick = toggleCollapsed;
+  urlEl.onclick = async () => {
+    try {
+      await copyText(job.url);
+      showToast("Copied playlist URL.", "copied");
+    } catch (error) {
+      setMessage(error.message, "error");
+      showToast("Could not copy playlist URL.", "error");
+    }
+  };
   openFolderButtonEl.onclick = () => {
     if (!job.outputFolder) return;
     openFolder(job).catch(error => setMessage(error.message, "error"));
