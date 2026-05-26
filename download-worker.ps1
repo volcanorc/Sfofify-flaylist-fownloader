@@ -1154,6 +1154,11 @@ try {
     $songQueue = @()
     $songs = @()
 
+    if ($urlType -eq "artist") {
+        Add-Log -Id $JobId -Message (Get-OperationLabel -Kind "save" -ItemName $urlType)
+        throw "Artist links are not currently available, sorry bro."
+    }
+
     if ($job.resumeOnlyMissing -and (Test-Path -LiteralPath $job.metadataPath)) {
         Add-Log -Id $JobId -Message (Get-OperationLabel -Kind "resume-check")
         $songs = Read-MetadataSongs -MetadataPath $job.metadataPath

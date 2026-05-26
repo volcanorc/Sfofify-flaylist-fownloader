@@ -122,21 +122,49 @@ function Get-FreePort {
     throw "Could not find an open port between $StartPort and $($StartPort + $Attempts - 1)."
 }
 
-function Invoke-RepairIfNeeded {
-    param(
-        [Parameter(Mandatory = $true)]$MissingTools
-    )
-
-    if ($SkipRepair) {
-        return
-    }
-
+function Get-RuntimeAnalysis {
     if (-not (Test-Path -LiteralPath $repair)) {
         throw "Runtime repair script was not found at $repair"
     }
 
-    foreach ($tool in $MissingTools) {
-        Write-StartupLine "Downloading missing $tool..."
+    $analysisJson = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $repair -Analyze -EmitJson $(if ($Offline) { "-Offline" })
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not analyze the local runtime state."
+    }
+
+    return $analysisJson | ConvertFrom-Json
+}
+
+function Show-ComponentsNeedingAction {
+    param(
+        [Parameter(Mandatory = $true)]$Components,
+        [Parameter(Mandatory = $true)][string]$Heading
+    )
+
+    Write-StartupLine $Heading
+    foreach ($component in @($Components)) {
+        Write-StartupLine ("- {0}: {1}" -f $component.name, $component.reason)
+    }
+}
+
+function Confirm-DownloadAction {
+    param([Parameter(Mandatory = $true)][string]$Prompt)
+
+    while ($true) {
+        $response = Read-Host "$Prompt [Y/N]"
+        if ($null -eq $response) {
+            continue
+        }
+
+        $answer = $response.Trim().ToUpperInvariant()
+        if ($answer -eq "Y") { return $true }
+        if ($answer -eq "N") { return $false }
+    }
+}
+
+function Invoke-RepairNow {
+    if (-not (Test-Path -LiteralPath $repair)) {
+        throw "Runtime repair script was not found at $repair"
     }
 
     $repairArgs = @(
@@ -144,8 +172,7 @@ function Invoke-RepairIfNeeded {
         "-ExecutionPolicy",
         "Bypass",
         "-File",
-        $repair,
-        "-Quiet"
+        $repair
     )
     if ($ForceRefresh) { $repairArgs += "-ForceRefresh" }
     if ($Offline) { $repairArgs += "-Offline" }
@@ -165,38 +192,48 @@ try {
 
     Write-StartupLine "Checking local runtime"
 
-    $spotdl = Resolve-Tool -LocalPath $localSpotdl -SystemCommand "spotdl.exe" -DisplayName "spotDL"
-    $ffmpeg = Resolve-Tool -LocalPath $localFfmpeg -SystemCommand "ffmpeg.exe" -DisplayName "FFmpeg"
-    $deno = Resolve-Tool -LocalPath $localDeno -SystemCommand "deno.exe" -DisplayName "Deno"
-
-    $missingNames = @()
-    foreach ($tool in @($spotdl, $ffmpeg, $deno)) {
-        if (-not $tool.Path) {
-            $missingNames += $tool.Name
-        }
-    }
+    $runtimeAnalysis = Get-RuntimeAnalysis
+    $componentsNeedingAction = @($runtimeAnalysis.componentsNeedingAction)
 
     if ($ForceRefresh) {
         if ($SkipRepair) {
             Write-StartupLine "Force refresh was requested, but repair is skipped."
         }
         else {
-            Write-StartupLine "Refreshing local runtime"
-            Invoke-RepairIfNeeded -MissingTools @("spotDL", "FFmpeg", "Deno")
-            $spotdl = Resolve-Tool -LocalPath $localSpotdl -SystemCommand "spotdl.exe" -DisplayName "spotDL"
-            $ffmpeg = Resolve-Tool -LocalPath $localFfmpeg -SystemCommand "ffmpeg.exe" -DisplayName "FFmpeg"
-            $deno = Resolve-Tool -LocalPath $localDeno -SystemCommand "deno.exe" -DisplayName "Deno"
+            $refreshComponents = @(
+                [pscustomobject]@{ name = "spotDL"; reason = "Reads Spotify metadata and manages downloads." },
+                [pscustomobject]@{ name = "FFmpeg"; reason = "Converts and finalizes downloaded audio files." },
+                [pscustomobject]@{ name = "Deno"; reason = "Runs the local web app." },
+                [pscustomobject]@{ name = "spotDL config"; reason = "Needed for the local downloader setup and provider defaults." }
+            )
+            Show-ComponentsNeedingAction -Components $refreshComponents -Heading "A runtime refresh was requested."
+            if (-not (Confirm-DownloadAction -Prompt "Download or refresh these local runtime files now?")) {
+                throw "Startup canceled because the runtime refresh was not approved."
+            }
+            Invoke-RepairNow
         }
     }
-    elseif ($missingNames.Count -gt 0 -or -not (Test-Path -LiteralPath $localSpotdlConfig)) {
-        if (-not (Test-Path -LiteralPath $localSpotdlConfig)) {
-            Write-StartupLine "Preparing local spotDL config"
+    elseif ($componentsNeedingAction.Count -gt 0) {
+        if ($SkipRepair) {
+            Show-ComponentsNeedingAction -Components $componentsNeedingAction -Heading "Some required local files are missing."
+            throw "Startup cannot continue because repair is skipped."
         }
-        Invoke-RepairIfNeeded -MissingTools $missingNames
-        $spotdl = Resolve-Tool -LocalPath $localSpotdl -SystemCommand "spotdl.exe" -DisplayName "spotDL"
-        $ffmpeg = Resolve-Tool -LocalPath $localFfmpeg -SystemCommand "ffmpeg.exe" -DisplayName "FFmpeg"
-        $deno = Resolve-Tool -LocalPath $localDeno -SystemCommand "deno.exe" -DisplayName "Deno"
+
+        if ($Offline) {
+            Show-ComponentsNeedingAction -Components $componentsNeedingAction -Heading "Some required local files are missing."
+            throw "Startup cannot continue in offline mode because the missing files cannot be downloaded."
+        }
+
+        Show-ComponentsNeedingAction -Components $componentsNeedingAction -Heading "Some required local files are missing."
+        if (-not (Confirm-DownloadAction -Prompt "Download the missing local runtime files now?")) {
+            throw "Startup canceled because the missing runtime files were not approved for download."
+        }
+        Invoke-RepairNow
     }
+
+    $spotdl = Resolve-Tool -LocalPath $localSpotdl -SystemCommand "spotdl.exe" -DisplayName "spotDL"
+    $ffmpeg = Resolve-Tool -LocalPath $localFfmpeg -SystemCommand "ffmpeg.exe" -DisplayName "FFmpeg"
+    $deno = Resolve-Tool -LocalPath $localDeno -SystemCommand "deno.exe" -DisplayName "Deno"
 
     foreach ($tool in @($spotdl, $ffmpeg, $deno)) {
         if (-not $tool.Path) {
@@ -204,6 +241,10 @@ try {
             throw "$($tool.Name) is unavailable.$offlineHint"
         }
         Log-ResolvedTool -Tool $tool
+    }
+
+    if (-not (Test-Path -LiteralPath $localSpotdlConfig)) {
+        throw "spotDL config is unavailable."
     }
 
     $selectedPort = Get-FreePort -StartPort $Port

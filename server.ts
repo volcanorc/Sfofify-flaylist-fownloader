@@ -372,7 +372,8 @@ for (let offset = 0; offset < maxPortAttempts; offset++) {
       return json({ error: "Missing playlist URL." }, 400);
     }
 
-    const job = await createJob(body.url.trim(), {
+    const requestedUrl = body.url.trim();
+    const job = await createJob(requestedUrl, {
       retryOf: body.retryOf?.trim() || null,
       resumeOnlyMissing: body.resumeOnlyMissing === true,
     });

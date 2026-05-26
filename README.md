@@ -1,52 +1,59 @@
 # Spotify Playlist Downloader
 
-Local web UI for downloading Spotify playlists with `spotdl`.
+This project gives you a simple local web app for downloading Spotify playlists, albums, and tracks on your own PC.
 
-## What this repo contains
+It uses [spotDL](https://github.com/spotDL/spotify-downloader) for the actual Spotify metadata and download workflow, then saves finished files into local folders inside this repo.
 
-- a local browser UI where you paste a Spotify playlist URL
-- a local worker that runs `spotdl`
-- automatic per-playlist output folders under `downloads`
-- a one-click repair/setup flow that downloads required runtime assets
+## What it supports
 
-## What this repo does not commit
+- Playlist links
+- Album links
+- Track links
+- Bulk downloads
 
-Large runtime and download folders stay local:
+Artist URLs are currently not available.
 
-- `.tools/`
-- `.spotdl/`
-- `.deno/`
-- `downloads/`
-- `app-data/`
+## How to use it
 
-Those are recreated automatically by the repair/setup scripts.
+1. Clone or pull this repo to your PC.
+2. Run `start-web.cmd`.
+3. If some local runtime files are missing, the app will ask before downloading them.
+4. Wait for the local web address to appear in the startup window.
+5. Open that local URL in your browser.
+6. Paste your Spotify playlist, album, or track link and start the download.
 
-## One-click start
+## What happens on first run
 
-1. Double-click `start-web.cmd`
-2. Wait for runtime repair/setup to finish
-3. Open `http://localhost:8976`
-4. Paste a Spotify playlist URL
+On the first run, the app checks whether the local runtime is ready.
 
-`start-web.cmd` automatically:
+If something is missing, it can download what it needs step by step:
 
-- checks/downloads the latest Windows `spotdl.exe`
-- ensures local `ffmpeg.exe`
-- ensures local `deno.exe`
-- starts the local web app
+- `spotDL`  
+  Needed to read Spotify metadata and manage the download process.
 
-## Manual repair
+- `FFmpeg`  
+  Needed to convert and finalize audio files.
 
-If you want to refresh dependencies before starting the app, run:
+- `Deno`  
+  Needed to run the local web app.
 
-- `repair.cmd`
+- `spotDL config`  
+  Needed for the local downloader setup and default provider settings.
 
-To force re-download the runtime assets:
+If everything is already installed, later launches stay quiet and go straight to the local web UI.
 
-- `repair.cmd -ForceRefresh`
+## Where files go
+
+Everything stays local to this repo.
+
+- Downloaded music goes into `downloads/`
+- Runtime files are kept in `.tools/` and `.spotdl/`
+- Job history and logs are kept in `app-data/`
+
+These folders are meant to stay on your machine and are not intended to be committed back into Git.
 
 ## Notes
 
 - Audio is not downloaded from Spotify directly.
-- `spotdl` reads Spotify metadata, then finds audio from providers such as YouTube Music, YouTube, and fallback sources.
-- If a song still fails after retries, it appears in the UI's missing songs section and full log.
+- spotDL reads Spotify metadata, then matches audio from supported providers.
+- If a song still cannot be downloaded after retries, it will show up in the app as missing with a log entry explaining what happened.

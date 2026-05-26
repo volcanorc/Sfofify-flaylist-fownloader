@@ -2,13 +2,15 @@ param(
     [switch]$ForceRefresh,
     [switch]$Quiet,
     [switch]$Offline,
-    [switch]$EmitJson
+    [switch]$EmitJson,
+    [switch]$Analyze
 )
 
 $ErrorActionPreference = "Stop"
 
 if ($EmitJson) {
     $Quiet = $true
+    $Analyze = $true
 }
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -102,6 +104,67 @@ function Get-LatestSpotdlAsset {
     return [pscustomobject]@{
         Version = $latestVersion
         Url = $winAsset.browser_download_url
+    }
+}
+
+function Get-ToolReport {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$LocalPath,
+        [Parameter(Mandatory = $true)][string]$SystemCommand,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    $localExists = Test-Path -LiteralPath $LocalPath
+    $systemPath = Resolve-ApplicationPath -Name $SystemCommand
+    $source = if ($localExists) { "local" } elseif ($systemPath) { "system" } else { "missing" }
+    $resolvedPath = if ($localExists) { $LocalPath } elseif ($systemPath) { $systemPath } else { $null }
+
+    return [pscustomobject]@{
+        name = $Name
+        reason = $Reason
+        localPath = $LocalPath
+        systemPath = $systemPath
+        resolvedPath = $resolvedPath
+        source = $source
+        localExists = [bool]$localExists
+        available = [bool]($source -ne "missing")
+        needsDownload = [bool](-not $localExists)
+    }
+}
+
+function Get-ConfigReport {
+    return [pscustomobject]@{
+        name = "spotDL config"
+        reason = "Needed for the local downloader setup and provider defaults."
+        localPath = $localConfigPath
+        source = if (Test-Path -LiteralPath $localConfigPath) { "local" } else { "missing" }
+        available = [bool](Test-Path -LiteralPath $localConfigPath)
+        needsSetup = [bool](-not (Test-Path -LiteralPath $localConfigPath))
+    }
+}
+
+function Get-RuntimeReport {
+    $spotdlReport = Get-ToolReport -Name "spotDL" -LocalPath $spotdlExe -SystemCommand "spotdl.exe" -Reason "Reads Spotify metadata and manages downloads."
+    $ffmpegReport = Get-ToolReport -Name "FFmpeg" -LocalPath $localFfmpegExe -SystemCommand "ffmpeg.exe" -Reason "Converts and finalizes downloaded audio files."
+    $denoReport = Get-ToolReport -Name "Deno" -LocalPath $localDenoExe -SystemCommand "deno.exe" -Reason "Runs the local web app."
+    $configReport = Get-ConfigReport
+
+    $componentsNeedingAction = @()
+    foreach ($component in @($spotdlReport, $ffmpegReport, $denoReport)) {
+        if ($component.needsDownload) {
+            $componentsNeedingAction += $component
+        }
+    }
+    if ($configReport.needsSetup) {
+        $componentsNeedingAction += $configReport
+    }
+
+    return [pscustomobject]@{
+        root = $root
+        components = @($spotdlReport, $ffmpegReport, $denoReport, $configReport)
+        componentsNeedingAction = @($componentsNeedingAction)
+        requiresAction = [bool]($componentsNeedingAction.Count -gt 0)
     }
 }
 
@@ -268,6 +331,21 @@ if (-not (Test-Path -LiteralPath $spotdlHome)) {
 
 if (-not (Test-Path -LiteralPath $appDataRoot)) {
     New-Item -ItemType Directory -Path $appDataRoot | Out-Null
+}
+
+$report = Get-RuntimeReport
+if ($Analyze) {
+    if ($EmitJson) {
+        $report | ConvertTo-Json -Depth 10 -Compress
+    }
+    else {
+        Write-Step "Runtime analysis complete."
+        foreach ($component in $report.components) {
+            $status = if ($component.available) { $component.source } else { "missing" }
+            Write-Step ("{0}: {1}" -f $component.name, $status)
+        }
+    }
+    return
 }
 
 Write-Step "Checking local runtime..."
